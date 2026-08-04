@@ -212,7 +212,9 @@ tbody tr:hover{background:#22252f}
     <div class="brand"><b>MCC Detection Rate</b><span>Solar Operations Center</span></div>
     <div class="navlab">Pa&iacute;ses</div>
     <nav class="nav" id="nav"></nav>
-    <div class="navlab" style="margin-top:18px">Datos</div>
+    <div class="navlab" style="margin-top:18px">An&aacute;lisis</div>
+    <div class="nav"><button id="trendBtn" class="tbtn"></button></div>
+    <div class="navlab" style="margin-top:14px">Datos</div>
     <div class="nav"><button id="adminBtn" class="tbtn"></button></div>
     <div class="sfoot" id="sfoot">cargando&hellip;</div>
   </aside>
@@ -280,11 +282,50 @@ tbody tr:hover{background:#22252f}
             <button id="pprev">&lsaquo; Anterior</button><button id="pnext">Siguiente &rsaquo;</button></div></div>
         </div>
       </div>
+      <div class="panel" style="margin-bottom:18px">
+        <div class="ph"><h2>Iniciativas destacadas</h2><span class="hint">Click para expandir</span></div>
+        <div class="psub">Hallazgos calculados sobre la selecci&oacute;n activa, y reglas de scope aplicables</div>
+        <div class="acc" id="acc"></div>
+      </div>
+
       <div class="panel">
         <div class="ph"><h2>Por qu&eacute; el denominador es este</h2>
           <span class="hint">WOs descartadas y su motivo</span></div>
         <div class="psub">Cada regla quita del c&aacute;lculo algo que el MCC no pod&iacute;a detectar</div>
         <div id="excl"></div>
+      </div>
+    </section>
+
+    <section id="trendView" style="display:none">
+      <div class="verdict" id="verdict"></div>
+
+      <div class="grid2">
+        <div class="panel">
+          <div class="ph"><h2>Direcci&oacute;n del detection rate</h2><span class="hint">Mes a mes</span></div>
+          <div class="psub">Las dos m&eacute;tricas juntas: por n&uacute;mero de WOs y ponderada por importe</div>
+          <div class="cw"><canvas id="tLine"></canvas></div>
+          <div class="expl" id="explLine"></div>
+        </div>
+        <div class="panel">
+          <div class="ph"><h2>Composici&oacute;n del periodo</h2><span class="hint" id="pieMetric"></span></div>
+          <div class="psub">Reparto entre lo que detect&oacute; el MCC y lo que abri&oacute; O&amp;M sin detecci&oacute;n previa</div>
+          <div class="cw"><canvas id="tPie"></canvas></div>
+          <div class="expl" id="explPie"></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:18px">
+        <div class="ph"><h2>Tiempo de detecci&oacute;n &mdash; MCC frente a O&amp;M</h2>
+          <span class="hint">Mediana mensual, escala logar&iacute;tmica</span></div>
+        <div class="psub">Horas desde el inicio de la incidencia hasta la creaci&oacute;n de la orden</div>
+        <div class="cw"><canvas id="tDet"></canvas></div>
+        <div class="expl" id="explDet"></div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><h2>C&oacute;mo leer esta secci&oacute;n</h2></div>
+        <div class="psub">Qu&eacute; significa cada elemento y qu&eacute; conclusi&oacute;n admite</div>
+        <div class="gloss" id="gloss"></div>
       </div>
     </section>
 
@@ -433,6 +474,9 @@ function initControls(){
   document.getElementById("pnext").onclick=()=>{S.page++;renderTable();};
   document.getElementById("adminBtn").onclick=()=>{
     S.view = S.view==="admin" ? "main" : "admin"; render();
+  };
+  document.getElementById("trendBtn").onclick=()=>{
+    S.view = S.view==="trend" ? "main" : "trend"; render();
   };
   document.getElementById("mx").onclick=closeModal;
   document.getElementById("ov").onclick=e=>{if(e.target.id==="ov")closeModal();};
@@ -696,6 +740,386 @@ function renderExcluded(rows){
 }
 </script>
 <script>
+/* ═══ VISTA DE TENDENCIA ═══ */
+let chL=null, chPie=null, chDet=null;
+
+/* Dirección: compara la media ponderada de la primera mitad del periodo con la de la
+   segunda, y la contrasta con la pendiente mes a mes. Si ambas no coinciden en signo
+   es oscilación, no tendencia, y conviene no extrapolar. */
+function trendCalc(monthly){
+  const key = REV() ? "rate_revenue" : "rate_wo";
+  const valid = monthly.filter(m=>m[key]!=null && m.wos>0);
+  if(valid.length<2) return null;
+  const half=Math.ceil(valid.length/2);
+  const wavg=arr=>{
+    if(REV()){
+      const mcc=arr.reduce((s,x)=>s+x.revenue_mcc,0), tot=arr.reduce((s,x)=>s+x.revenue_total,0);
+      return tot?mcc/tot*100:null;
+    }
+    const mcc=arr.reduce((s,x)=>s+x.wo_mcc,0), tot=arr.reduce((s,x)=>s+x.wos,0);
+    return tot?mcc/tot*100:null;
+  };
+  const h1=valid.slice(0,half), h2=valid.slice(half);
+  const a=wavg(h1), b=wavg(h2);
+  const ys=valid.map(m=>m[key]), n=ys.length;
+  const sx=(n-1)*n/2, sxx=ys.reduce((s,_,i)=>s+i*i,0);
+  const sy=ys.reduce((s,y)=>s+y,0), sxy=ys.reduce((s,y,i)=>s+i*y,0);
+  const slope=(n*sxy-sx*sy)/(n*sxx-sx*sx);
+  return {months:valid, delta:+(b-a).toFixed(1), slope:+slope.toFixed(2), h1:a, h2:b,
+          n1:h1.reduce((s,x)=>s+x.wos,0), n2:h2.reduce((s,x)=>s+x.wos,0)};
+}
+
+function renderVerdict(sum, monthly, conc, split){
+  const el=document.getElementById("verdict");
+  const t=trendCalc(monthly);
+  const scope = S.contractor || S.portfolio || S.country || "toda la flota";
+  if(!t){
+    el.innerHTML=`<div class="arrow" style="color:var(--dim)">–</div><div class="vmain">
+      <h2>Sin tendencia calculable</h2>
+      <p>Hacen falta al menos dos meses con datos en la métrica seleccionada. Amplía el
+      rango de fechas o cambia de métrica.</p></div>`;
+    return;
+  }
+  const d=t.delta, up=d>=2, dn=d<=-2;
+  const arrow=up?"▲":dn?"▼":"▬";
+  const col=up?"var(--ok)":dn?"var(--bad)":"var(--mut)";
+  const word=up?"Mejorando":dn?"Empeorando":"Estable";
+  const consistent = Math.sign(t.slope)===Math.sign(d) && Math.abs(t.slope)>0.5;
+
+  /* Fiabilidad: con poco volumen o con el importe muy concentrado, la dirección no
+     es concluyente y hay que decirlo antes de que alguien la presente. */
+  const lowVol = sum.wos<50 || Math.min(t.n1,t.n2)<12;
+  const outlier = REV() && conc && conc.top_share>=20;
+
+  let narrative = `En ${esc(scope)}, el detection rate medido por <b>${REV()?"Revenue Loss":"número de WOs"}</b> `+
+    `pasó del <b>${t.h1.toFixed(1)}%</b> en la primera mitad del periodo al <b>${t.h2.toFixed(1)}%</b> `+
+    `en la segunda, ${d>=0?"una mejora":"un deterioro"} de <b>${Math.abs(d)} pp</b>. `;
+  narrative += consistent
+    ? `La pendiente mes a mes (${t.slope>0?"+":""}${t.slope} pp/mes) apunta en la misma dirección, así que la tendencia es consistente y no un salto puntual.`
+    : `La pendiente mes a mes (${t.slope>0?"+":""}${t.slope} pp/mes) no acompaña con claridad, así que conviene leerlo como oscilación más que como tendencia establecida.`;
+
+  let warn="";
+  if(lowVol) warn += `<b>Volumen bajo:</b> ${sum.wos} WOs en la selección (${t.n1} vs ${t.n2} al comparar mitades). Con esta muestra un par de incidencias mueven el porcentaje decenas de puntos. `;
+  if(outlier) warn += `<b>Métrica sensible a extremos:</b> las ${conc.items.length} incidencias más caras concentran el ${conc.top_share}% del importe (la mayor, ${MU(conc.items[0].revenue_loss)} € en ${esc(conc.items[0].plant)}, ya es el ${conc.top1_share}%). Un único evento grande mueve el rate económico más que meses de trabajo. `;
+  if(REV() && sum.revenue_coverage<90) warn += `<b>Cobertura parcial:</b> sólo el ${sum.revenue_coverage}% de las WOs tienen Revenue Loss informado. `;
+  if(REV() && !S.status && split && split.share_open_revenue>=25) warn += `<b>Estados mezclados:</b> el ${split.share_open_revenue}% del importe viene de incidencias todavía abiertas, cuya pérdida sigue acumulando. Filtra a <i>solo cerradas</i> para comparar importes homogéneos. `;
+  if(S.status==="open") warn += `<b>Solo abiertas:</b> los importes son provisionales y seguirán subiendo, lo que favorece a los meses más antiguos. `;
+
+  const flag=(lowVol||outlier)?` <span class="st risk" style="vertical-align:middle;margin-left:8px">Poco fiable</span>`:"";
+  el.innerHTML=`
+    <div class="arrow" style="color:${col}">${arrow}</div>
+    <div class="vmain"><h2 style="color:${col}">${word} · ${d>=0?"+":""}${d} pp${flag}</h2>
+      <p>${narrative}</p>${warn?`<p class="warn">⚠ ${warn}</p>`:""}</div>
+    <div class="vnums">
+      <div>Rate por WO<b style="color:${rc(sum.rate_wo)}">${sum.rate_wo??"—"}%</b></div>
+      <div>Rate por revenue<b style="color:${rc(sum.rate_revenue)}">${sum.rate_revenue??"—"}%</b></div>
+      <div>Pérdida total<b>${MU(sum.revenue_total)} €</b></div>
+      <div>No detectado<b style="color:var(--bad)">${MU(sum.revenue_ext)} €</b></div>
+    </div>`;
+}
+
+function renderTLine(monthly){
+  const ctx=document.getElementById("tLine");
+  if(chL) chL.destroy();
+  chL=new Chart(ctx,{type:"line",data:{labels:monthly.map(m=>ml(m.period)),datasets:[
+    {label:"Por WO (%)",data:monthly.map(m=>m.rate_wo),borderColor:"#5b9bd5",borderWidth:2.6,
+     pointBackgroundColor:"#5b9bd5",pointBorderColor:"#12141d",pointBorderWidth:2,pointRadius:5,
+     pointHoverRadius:8,tension:.3,spanGaps:true,borderDash:REV()?[5,4]:[]},
+    {label:"Por Revenue Loss (%)",data:monthly.map(m=>m.rate_revenue),borderColor:"#E8A020",
+     borderWidth:2.6,pointBackgroundColor:"#E8A020",pointBorderColor:"#12141d",pointBorderWidth:2,
+     pointRadius:5,pointHoverRadius:8,tension:.3,spanGaps:true,borderDash:REV()?[]:[5,4]}]},
+  options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+    plugins:{legend:{position:"top",align:"end",labels:{boxWidth:11,boxHeight:11,
+        usePointStyle:true,pointStyle:"circle",padding:15,font:{size:11.5}}},
+      tooltip:{...TT,callbacks:{
+        label:c=>"  "+c.dataset.label+": "+(c.raw==null?"—":c.raw+"%"),
+        afterBody:it=>{const m=monthly[it[0].dataIndex];
+          return ["  "+m.wos+" WOs · "+MU(m.revenue_total)+" € de pérdida"];}}}},
+    scales:{y:{min:0,max:100,grid:{color:"rgba(46,50,67,.5)"},ticks:{callback:v=>v+"%",font:{size:11}}},
+      x:{grid:{display:false},ticks:{font:{size:11}}}}}});
+
+  const both=monthly.filter(m=>m.rate_wo!=null&&m.rate_revenue!=null);
+  const gap = both.length ? (both.reduce((s,m)=>s+(m.rate_revenue-m.rate_wo),0)/both.length).toFixed(1) : null;
+  document.getElementById("explLine").innerHTML=`
+    <span class="k"><i style="background:#5b9bd5"></i>Por WO</span>
+    <span class="k"><i style="background:#E8A020"></i>Por Revenue Loss</span><br><br>
+    <b>Qué mide cada línea.</b> La azul cuenta incidencias: de cada 100 WOs en scope,
+    cuántas vio el MCC antes que el contratista. La naranja pesa esas mismas WOs por los
+    euros perdidos, así que una incidencia de 50.000 € cuenta más que una de 20 €.<br><br>
+    <b>Qué significa que estén separadas.</b> ${gap==null
+      ? "No hay meses con ambas métricas para comparar."
+      : `La naranja va de media <b>${gap} pp</b> ${gap>0?"por encima":"por debajo"} de la azul.
+         ${gap>0?`Cuidado con la lectura fácil: eso no prueba que el MCC cace lo caro. Si mezclas
+         estados, las incidencias abiertas del MCC acumulan pérdida y lo inflan — filtra a
+         <i>solo cerradas</i> y compara.`:""}`}
+    La línea de trazo continuo es la métrica seleccionada arriba.`;
+}
+
+function renderTPie(sum){
+  document.getElementById("pieMetric").textContent = REV()?"En euros":"En número de WOs";
+  const mcc = REV()?sum.revenue_mcc:sum.wo_mcc;
+  const ext = REV()?sum.revenue_ext:sum.wo_ext;
+  const total = mcc+ext;
+  const ctx=document.getElementById("tPie");
+  if(chPie) chPie.destroy();
+  chPie=new Chart(ctx,{type:"doughnut",
+    data:{labels:["Detectado por el MCC","Abierto por O&M sin detección previa"],
+      datasets:[{data:[mcc,ext],backgroundColor:["rgba(62,201,138,.82)","rgba(224,92,92,.78)"],
+        borderColor:"#1c1e2a",borderWidth:3,hoverOffset:8}]},
+    options:{responsive:true,maintainAspectRatio:false,cutout:"58%",
+      plugins:{legend:{position:"bottom",labels:{boxWidth:11,boxHeight:11,usePointStyle:true,
+          pointStyle:"circle",padding:14,font:{size:11.5}}},
+        tooltip:{...TT,callbacks:{label:c=>{
+          const pct=total?(c.raw/total*100).toFixed(1):0;
+          return "  "+(REV()?MU(c.raw)+" €":c.raw+" WOs")+" · "+pct+"%";}}}}}});
+
+  document.getElementById("explPie").innerHTML=`
+    <b>Qué representa el anillo.</b> El total del periodo repartido en dos: en verde lo que
+    el MCC detectó antes que el contratista, en rojo lo que el contratista abrió sin que el
+    MCC lo hubiera visto. El porcentaje verde <b>es</b> el detection rate.<br><br>
+    <b>Lo que estás viendo ahora.</b> ${REV()
+      ? `De <b>${MU(sum.revenue_total)} €</b> con importe informado, el MCC detectó
+         <b>${MU(sum.revenue_mcc)} €</b> (${sum.rate_revenue??"—"}%) y se le escaparon
+         <b>${MU(sum.revenue_ext)} €</b>. Calculado sobre el ${sum.revenue_coverage}% de las
+         WOs que tienen importe: las demás no suman ni al numerador ni al denominador.`
+      : `De <b>${sum.wos} WOs</b> en scope, el MCC detectó <b>${sum.wo_mcc}</b>
+         (${sum.rate_wo??"—"}%) y <b>${sum.wo_ext}</b> las abrió O&M primero. Aquí todas
+         pesan igual, costaran 20 € o 50.000 €.`}<br><br>
+    <b>Para qué sirve.</b> Cambiar la métrica arriba y ver cómo se mueve el reparto dice si
+    el problema es de volumen o de valor.`;
+}
+
+function renderTDet(sum, monthly){
+  const ctx=document.getElementById("tDet");
+  if(chDet) chDet.destroy();
+  chDet=new Chart(ctx,{type:"line",data:{labels:monthly.map(m=>ml(m.period)),datasets:[
+    {label:"MCC",data:monthly.map(m=>m.detection_median_mcc),borderColor:"#3ec98a",
+     backgroundColor:"rgba(62,201,138,.12)",borderWidth:2.6,pointRadius:5,pointHoverRadius:8,
+     tension:.3,fill:true,spanGaps:true},
+    {label:"O&M",data:monthly.map(m=>m.detection_median_ext),borderColor:"#e05c5c",
+     backgroundColor:"rgba(224,92,92,.10)",borderWidth:2.6,pointRadius:5,pointHoverRadius:8,
+     tension:.3,fill:true,spanGaps:true}]},
+  options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+    plugins:{legend:{position:"top",align:"end",labels:{boxWidth:11,boxHeight:11,
+        usePointStyle:true,pointStyle:"circle",padding:15,font:{size:11.5}}},
+      tooltip:{...TT,callbacks:{label:c=>"  "+c.dataset.label+": "+HU(c.raw)}}},
+    scales:{y:{type:"logarithmic",grid:{color:"rgba(46,50,67,.5)"},
+        ticks:{font:{size:11},callback:v=>[0.5,1,2,6,12,24,48,168,720].some(x=>Math.abs(v-x)<1e-9)?HU(v):null},
+        title:{display:true,text:"Mediana (log)",font:{size:11}}},
+      x:{grid:{display:false},ticks:{font:{size:11}}}}}});
+
+  const ratio = (sum.detection_median_mcc && sum.detection_median_ext)
+    ? (sum.detection_median_ext/sum.detection_median_mcc).toFixed(0) : null;
+  document.getElementById("explDet").innerHTML=`
+    <span class="k"><i style="background:#3ec98a"></i>MCC</span>
+    <span class="k"><i style="background:#e05c5c"></i>O&M</span><br><br>
+    <b>Qué mide.</b> La mediana de horas entre el <b>Start Ts</b> de la incidencia y el
+    <b>WO Created Ts</b> de la orden. En la selección actual: MCC
+    <b>${HU(sum.detection_median_mcc)}</b> frente a O&M <b>${HU(sum.detection_median_ext)}</b>
+    ${ratio?`, es decir <b>${ratio}×</b> más rápido`:""}.<br><br>
+    <b>Por qué mediana y escala logarítmica.</b> La distribución tiene colas de semanas, así
+    que la media engañaría, y en escala lineal la línea del MCC quedaría aplastada contra el
+    eje.<br><br>
+    <b>Cuidado con la lectura.</b> No es mérito ni demérito puro: el MCC vigila en continuo
+    desde SCADA y el contratista suele detectar en visita a planta, así que compiten en
+    condiciones distintas. Mide la ventaja de la monitorización remota, no el esfuerzo de dos
+    equipos. Cobertura del dato: <b>${sum.detection_coverage}%</b>.`;
+}
+
+function renderGloss(sum, split){
+  const diff = (sum.rate_revenue!=null&&sum.rate_wo!=null)
+    ? +(sum.rate_revenue-sum.rate_wo).toFixed(1) : null;
+  document.getElementById("gloss").innerHTML=`
+    <div><h4>Detection Rate</h4><p>De todas las incidencias en scope, el porcentaje que el
+      MCC detectó y registró antes de que el contratista abriera su propia orden.
+      <b>MCC / (MCC + O&amp;M)</b>. No es un porcentaje de aciertos sobre alarmas: es una
+      carrera contra el contratista.</p></div>
+    <div><h4>Por WO frente a por Revenue Loss</h4><p>Por WO cada incidencia vale uno, así que
+      mide cobertura operativa. Por importe cada una pesa los euros que costó, así que mide
+      protección económica. ${diff==null?"":`Ahora difieren en <b>${diff>0?"+":""}${diff} pp</b>.`}
+      Las dos son válidas y responden a preguntas distintas.</p></div>
+    <div><h4>Abiertas frente a cerradas</h4><p>${split
+      ? `En una WO abierta la pérdida sigue acumulando, así que su importe es una foto del día
+         de la exportación, no una cifra final. Aquí las abiertas son
+         <b>${split.share_open_count}%</b> del recuento pero <b>${split.share_open_revenue}%</b>
+         del importe. Cerradas: ${split.closed.rate_wo??"—"}% por WO y
+         ${split.closed.rate_revenue??"—"}% por € · Abiertas: ${split.open.rate_wo??"—"}% y
+         ${split.open.rate_revenue??"—"}%. Para conclusiones económicas usa <i>solo cerradas</i>.`
+      : "Sin datos de reparto."}</p></div>
+    <div><h4>Cobertura del dato económico</h4><p>Revenue Loss está informado en el
+      <b>${sum.revenue_coverage}%</b> de las WOs de esta selección. Las que no lo tienen quedan
+      fuera del cálculo en euros, <b>no cuentan como cero</b>. Por debajo del 80% el rate
+      económico es indicativo, no concluyente.</p></div>
+    <div><h4>Dirección y pendiente</h4><p>La dirección compara la media ponderada de la primera
+      mitad del periodo con la de la segunda. La pendiente es una regresión sobre los meses. Si
+      coinciden en signo la tendencia es consistente; si no, es oscilación y no conviene
+      extrapolar.</p></div>
+    <div><h4>Qué NO dice esta sección</h4><p>Un rate bajo no implica mala vigilancia: puede ser
+      configuración de alarmas, umbrales inactivos o equipos sin telemetría. Y un rate alto con
+      poco volumen (menos de unas 10 WOs) es ruido, no señal.</p></div>`;
+}
+
+async function renderTrendView(sum, monthly){
+  try{
+    const [conc,split]=await Promise.all([
+      api("/api/kpis/revenue-concentration",qs({top:5})),
+      api("/api/kpis/status-split",qs())]);
+    renderVerdict(sum,monthly,conc,split);
+    renderTLine(monthly);
+    renderTPie(sum);
+    renderTDet(sum,monthly);
+    renderGloss(sum,split);
+  }catch(err){ showError(err.message); }
+}
+
+function renderTrendBtn(monthly, sum){
+  const b=document.getElementById("trendBtn");
+  b.classList.toggle("on", S.view==="trend");
+  const t = monthly ? trendCalc(monthly) : null;
+  let arrow="–", col="var(--dim)", word="Sin datos", sub="amplía el rango";
+  if(t){
+    const d=t.delta, up=d>=2, dn=d<=-2;
+    arrow=up?"▲":dn?"▼":"▬";
+    col=up?"var(--ok)":dn?"var(--bad)":"var(--mut)";
+    word=up?"Mejorando":dn?"Empeorando":"Estable";
+    sub=`${d>=0?"+":""}${d} pp · ${REV()?"por revenue":"por WO"}`;
+  }
+  b.innerHTML=`<span class="tl"><span>Tendencia</span>
+      <span style="color:${col};font-size:15px;line-height:1">${arrow}</span></span>
+    <span class="tv" style="color:${col};font-weight:600">${word}</span>
+    <span class="tv" style="color:var(--dim)">${sub}</span>`;
+}
+</script>
+
+<script>
+/* ═══ INICIATIVAS Y HALLAZGOS ═══
+   Las curadas llevan ámbito de país; los hallazgos se calculan sobre la selección
+   activa, con umbrales mínimos para no concluir sobre tres WOs. */
+const INITIATIVES = [
+  {t:"Onboarding N3C — cobertura de monitorización", s:"live", sl:"En producción", sc:null,
+   d:"Sólo entran en el cálculo las plantas con onboarding N3C completado, y únicamente a partir de su fecha de alta. Evita penalizar al MCC por activos sobre los que aún no tenía telemetría.",
+   k:[["Fuente","informe N3C"]]},
+  {t:"Filtro de visibilidad por dispositivo", s:"live", sl:"En producción", sc:null,
+   d:"Cada WO se valida contra la matriz de visibilidad de su planta por dispositivo (SST, INV, POI, WST, PPC). Las incidencias sobre equipos que el MCC no ve en SCADA quedan fuera.",
+   k:[["Dimensiones","5 dispositivos"]]},
+  {t:"Filtro Cause = Failure", s:"live", sl:"En producción", sc:["Spain","Portugal","Chile"],
+   d:"En España, Portugal y Chile sólo cuentan las WOs con Cause = Failure. Las causas externas (curtailment, red, meteorología) no son detectables como avería y distorsionarían el rate de estos tres mercados.",
+   k:[["Países","ES · PT · CL"]]},
+  {t:"Castelnau — pérdida de comunicaciones SCADA", s:"risk", sl:"Excluido", sc:["France"],
+   d:"Castelnau perdió comunicación SCADA el 2026-07-03. Sus WOs a partir de esa fecha se excluyen: sin telemetría el MCC no puede detectar nada. Pendiente restablecer el enlace.",
+   k:[["Desde","2026-07-03"]]},
+  {t:"Trazabilidad cruzada — campo SX WO Number", s:"prog", sl:"En curso", sc:null,
+   d:"El campo diseñado para cruzar WOs entre el sistema del MCC y el de los contratistas está vacío en el 100% de los casos. La identidad de una WO se reconstruye con planta + inicio + equipo + descripción, que funciona pero es heurística.",
+   k:[["Relleno","0%"]]},
+  {t:"Reatribuciones entre exports", s:"risk", sl:"Vigilar", sc:null,
+   d:"La misma WO puede cambiar de MCC a O&M o al revés entre dos exports del mismo periodo. El backend lo detecta y lo audita, pero significa que una cifra ya reportada puede quedar desfasada. Consultable en «Cargas y auditoría».",
+   k:[["Detectadas","ver auditoría"]]},
+];
+
+function accCard(item, id, open){
+  return `<div class="item ${open?"open":""}" data-n="${id}">
+    <div class="ihead"><span class="ic">▶</span><span class="it">${esc(item.t)}</span>
+      <span class="st ${item.s}">${esc(item.sl)}</span></div>
+    <div class="ibody"><div class="iin"><p>${esc(item.d)}</p>
+      <div class="imp">${(item.k||[]).map(k=>`<div>${esc(k[0])}<b>${esc(k[1])}</b></div>`).join("")}</div>
+    </div></div></div>`;
+}
+
+/* Hallazgos derivados de la selección activa. Sólo aparecen si el dato lo justifica. */
+function buildFindings(sum, byPlant, byEquip, byCtr, monthly, conc){
+  const out=[];
+  const scope = S.contractor || S.portfolio || S.country || "el conjunto de la flota";
+  if(!sum.wos) return out;
+
+  const gap=byPlant.filter(p=>p.wo_ext>0).sort((a,b)=>b.wo_ext-a.wo_ext);
+  if(sum.wo_ext>=10 && gap.length>=3){
+    const top=gap.slice(0,3), sub=top.reduce((s,p)=>s+p.wo_ext,0);
+    const share=Math.round(sub/sum.wo_ext*100);
+    out.push({t:`El ${share}% de las WOs no detectadas se concentra en 3 plantas`,
+      s:share>=60?"risk":"prog", sl:share>=60?"Muy concentrado":"Concentrado",
+      d:`De las ${sum.wo_ext} WOs que abrió O&M sin detección previa en ${scope}, ${sub} salen de `+
+        top.map(p=>`${p.key} (${p.wo_ext})`).join(", ")+`. `+
+        (share>=60
+          ? "Una concentración así apunta a configuración de alarmas en esas plantas concretas, no a un problema general de cobertura."
+          : "Priorizar estas plantas es la vía más rentable para subir el rate."),
+      k:top.map(p=>[p.key,(p.rate_wo??"—")+"%"])});
+  }
+
+  const crit=byPlant.filter(p=>p.wo_ext>=5 && p.rate_wo!=null && p.rate_wo<15)
+    .sort((a,b)=>a.rate_wo-b.rate_wo);
+  if(crit.length) out.push({t:`${crit.length} planta${crit.length>1?"s":""} por debajo del 15% de detección`,
+    s:"risk", sl:"Requiere revisión",
+    d:`Con al menos 5 WOs en el periodo: `+crit.slice(0,6).map(p=>`${p.key} (${p.rate_wo}%, ${p.wo_ext} sin detectar)`).join(" · ")+
+      `${crit.length>6?` y ${crit.length-6} más`:""}. Un rate tan bajo con volumen suficiente suele indicar alarmas mal configuradas o umbrales inactivos, más que fallo de vigilancia.`,
+    k:crit.slice(0,3).map(p=>[p.key,p.rate_wo+"%"])});
+
+  const eq=byEquip.filter(e=>e.wo_ext>0).sort((a,b)=>b.wo_ext-a.wo_ext);
+  if(eq.length && sum.wo_ext>=10){
+    const e0=eq[0], share=Math.round(e0.wo_ext/sum.wo_ext*100);
+    if(share>=50) out.push({t:`${e0.key} genera el ${share}% del gap`, s:"prog", sl:"Foco de equipo",
+      d:`${e0.wo_ext} de las ${sum.wo_ext} WOs no detectadas son de ${e0.key.toLowerCase()} (rate ${e0.rate_wo??"—"}%). Es el punto con más retorno: mejorar ahí arrastra el rate global de ${scope}.`,
+      k:eq.slice(0,3).map(e=>[e.key,e.wo_ext+" sin detectar"])});
+  }
+
+  if(!S.contractor){
+    const ks=byCtr.filter(c=>c.wos>=25 && c.rate_wo!=null).sort((a,b)=>a.rate_wo-b.rate_wo);
+    if(ks.length>=2 && ks.at(-1).rate_wo-ks[0].rate_wo>=15){
+      const w=ks[0], b=ks.at(-1);
+      out.push({t:`Hasta ${(b.rate_wo-w.rate_wo).toFixed(1)} pp de diferencia entre contratistas`,
+        s:"risk", sl:"Brecha por contratista",
+        d:`Con 25 o más WOs, <b>${w.key}</b> va al ${w.rate_wo}% (${w.wo_ext} sin detectar de ${w.wos}) y <b>${b.key}</b> al ${b.rate_wo}%. Un contratista muy activo abriendo WOs primero puede significar que detecta mejor en campo, o que el MCC no tiene alarmas afinadas en sus plantas. Conviene contrastarlo planta a planta antes de sacar conclusiones sobre nadie.`,
+        k:ks.slice(0,3).map(c=>[c.key,c.rate_wo+"%"])});
+    }
+  }
+
+  const valid=monthly.filter(m=>m.rate_wo!=null && m.wos>=8);
+  if(valid.length>=2){
+    const best=[...valid].sort((a,b)=>b.rate_wo-a.rate_wo)[0];
+    const worst=[...valid].sort((a,b)=>a.rate_wo-b.rate_wo)[0];
+    if(best.rate_wo-worst.rate_wo>=8) out.push({
+      t:`Oscilación de ${(best.rate_wo-worst.rate_wo).toFixed(1)} pp entre meses (peor: ${ml(worst.period)})`,
+      s:"plan", sl:"Variabilidad",
+      d:`${ml(worst.period)} cerró al ${worst.rate_wo}% (${worst.wos} WOs) y ${ml(best.period)} al ${best.rate_wo}%. Una horquilla así sugiere que el rate depende de qué plantas tuvieron incidencias ese mes, así que conviene leerlo junto al detalle por planta.`,
+      k:valid.map(m=>[ml(m.period),m.rate_wo+"%"])});
+  }
+
+  if(conc && conc.top_share>=20) out.push({
+    t:`Las ${conc.items.length} incidencias más caras son el ${conc.top_share}% del importe`,
+    s:"risk", sl:"Sensible a extremos",
+    d:`El rate por euros lo deciden unos pocos eventos: la mayor (${MU(conc.items[0].revenue_loss)} € en ${conc.items[0].plant}) ya es el ${conc.top1_share}% del total. Antes de leer una variación del rate económico como cambio de rendimiento, comprueba si la mueve un único incidente.`,
+    k:conc.items.slice(0,3).map(i=>[i.plant,MU(i.revenue_loss)+" €"])});
+
+  const perfect=byPlant.filter(p=>p.wos>=5 && p.rate_wo===100);
+  if(perfect.length) out.push({t:`${perfect.length} planta${perfect.length>1?"s":""} con detección del 100%`,
+    s:"live", sl:"Referencia",
+    d:`Con 5 o más WOs y ninguna abierta por O&M sin detección previa: `+
+      perfect.slice(0,8).map(p=>`${p.key} (${p.wos})`).join(" · ")+
+      `${perfect.length>8?` y ${perfect.length-8} más`:""}. Sirven de patrón de configuración para replicar en las plantas críticas.`,
+    k:[["Plantas",String(perfect.length)]]});
+
+  return out;
+}
+
+let accOpen=null;
+function renderAcc(findings){
+  const curated=INITIATIVES.filter(i=>!i.sc || !S.country || i.sc.includes(S.country));
+  const scopeLabel = S.contractor || S.portfolio || S.country || "toda la flota";
+  let html="";
+  if(findings.length) html+=`<div class="grp">Hallazgos del periodo · ${esc(scopeLabel)}</div>`+
+    findings.map((f,i)=>accCard(f,"f"+i,accOpen==="f"+i)).join("");
+  html+=`<div class="grp">Iniciativas y reglas de scope${S.country?" · aplicables a "+esc(S.country):""}</div>`+
+    curated.map((c,i)=>accCard(c,"i"+i,accOpen==="i"+i)).join("");
+  const box=document.getElementById("acc");
+  box.innerHTML=html;
+  box.querySelectorAll(".item").forEach(el=>
+    el.querySelector(".ihead").onclick=()=>{
+      accOpen = accOpen===el.dataset.n ? null : el.dataset.n;
+      renderAcc(findings);
+    });
+}
+</script>
+
+<script>
 /* ═══ Drill-downs ═══ */
 const ov=document.getElementById("ov");
 function closeModal(){ ov.classList.remove("on"); }
@@ -866,12 +1290,14 @@ async function loadMeta(){
 
 let inFlight=0;
 async function render(){
-  const isAdmin=S.view==="admin";
-  document.getElementById("mainView").style.display=isAdmin?"none":"";
-  document.getElementById("adminView").style.display=isAdmin?"":"none";
+  const view=S.view;
+  document.getElementById("mainView").style.display  = view==="main"  ? "" : "none";
+  document.getElementById("trendView").style.display = view==="trend" ? "" : "none";
+  document.getElementById("adminView").style.display = view==="admin" ? "" : "none";
+  const prefix = view==="admin" ? "Cargas y auditoría — "
+               : view==="trend" ? "Tendencia — " : "Detection Rate — ";
   document.getElementById("title").textContent =
-    (isAdmin?"Cargas y auditoría — ":"Detection Rate — ") +
-    (S.contractor || S.portfolio || S.country || "Todos los países");
+    prefix + (S.contractor || S.portfolio || S.country || "Todos los países");
 
   const token=++inFlight;
   try{
@@ -887,15 +1313,22 @@ async function render(){
       (S.type==="P"?"solo Production Loss":S.type==="C"?"solo Communication Loss":"Production + Communication") +
       (S.status?" · "+(S.status==="open"?"solo abiertas":"solo cerradas"):"");
 
-    if(isAdmin){ await renderAdmin(); return; }
+    // La serie mensual se necesita en las tres vistas: alimenta los sparklines, la
+    // dirección de la tendencia y el indicador del sidebar.
+    const monthly = await api("/api/kpis/timeseries", params+"&granularity=month");
+    if(token!==inFlight) return;
+    renderTrendBtn(monthly, sum);
 
-    const [series,monthly,byEquip,byDim,byPlant,excluded] = await Promise.all([
+    if(view==="admin"){ await renderAdmin(); return; }
+    if(view==="trend"){ await renderTrendView(sum, monthly); return; }
+
+    const [series,byEquip,byDim,byPlant,excluded,conc] = await Promise.all([
       api("/api/kpis/timeseries",params+"&granularity=week"),
-      api("/api/kpis/timeseries",params+"&granularity=month"),
       api("/api/kpis/by/equipment",params),
       api("/api/kpis/by/"+S.dim,params),
       api("/api/kpis/by/plant",params),
-      api("/api/scope/excluded",params)]);
+      api("/api/scope/excluded",params),
+      api("/api/kpis/revenue-concentration",params+"&top=5")]);
     if(token!==inFlight) return;
 
     renderKpis(sum,monthly);
@@ -904,6 +1337,10 @@ async function render(){
     renderDim(byDim);
     plantRows=byPlant; renderTable();
     renderExcluded(excluded);
+
+    const byCtr = S.dim==="contractor" ? byDim : await api("/api/kpis/by/contractor",params);
+    if(token!==inFlight) return;
+    renderAcc(buildFindings(sum, byPlant, byEquip, byCtr, monthly, conc));
   }catch(err){ showError(err.message); }
 }
 

@@ -158,6 +158,8 @@ tiempo negativo.
 | `GET /api/kpis/summary` | KPIs del periodo con los tres ejes: WO, importe y tiempo |
 | `GET /api/kpis/timeseries?granularity=week\|month` | Serie temporal |
 | `GET /api/kpis/by/{country\|portfolio\|contractor\|equipment\|plant\|month\|week}` | Agrupación |
+| `GET /api/kpis/revenue-concentration` | Cuánto del importe está en las incidencias más caras |
+| `GET /api/kpis/status-split` | Reparto abierto/cerrado con sus métricas, ignorando el filtro de estado |
 | `GET /api/wos/missed` | WOs abiertas por O&M sin detección previa — la lista accionable |
 | `GET /api/scope/excluded` | Motivos de exclusión, para justificar el denominador |
 | `GET /api/scope/rules` | Reglas activas y exclusiones de planta |
@@ -174,6 +176,24 @@ Filtros comunes, combinables entre sí: `from`, `to` (`YYYY-MM`), `country`,
 El portfolio es **ortogonal al país**, no un subnivel: Toro 1 tiene plantas en Francia,
 Italia y España, y Toro 2 en cinco países. Agruparlo bajo país partiría Toro 1 en tres
 trozos y ocultaría la comparación que importa.
+
+## El dashboard
+
+Tres vistas, en el lateral izquierdo:
+
+- **Detection Rate** — 5 KPIs (rate, volumen, detectadas, mediana de detección, no detectadas),
+  evolución semanal conmutable entre WO y euros, desglose por equipo, panel de portfolio o
+  contratista, tabla de plantas, **iniciativas y hallazgos**, y el detalle de por qué se
+  descarta cada WO fuera de scope.
+- **Tendencia** — veredicto de dirección con avisos de fiabilidad, las dos métricas juntas mes
+  a mes, composición del periodo en anillo, tiempo de detección MCC frente a O&M en escala
+  logarítmica, y un glosario de qué significa cada cosa y qué conclusión admite.
+- **Cargas y auditoría** — subir exports, ver las reatribuciones detectadas y los ficheros
+  cargados.
+
+Los hallazgos se calculan sobre la selección activa y sólo aparecen si el dato lo justifica
+(umbrales mínimos de volumen). Las iniciativas curadas llevan ámbito de país: Castelnau sólo
+sale en Francia, y `Cause = Failure` sólo en España, Portugal y Chile.
 
 ## Tests
 

@@ -209,6 +209,83 @@ def missed_wos(session: Session, filters: Filters, limit: int = 500, offset: int
     }
 
 
+def revenue_concentration(session: Session, filters: Filters, top: int = 5) -> dict:
+    """
+    Cuánto del importe total se concentra en las incidencias más caras.
+
+    El rate por euros es muy sensible a los extremos: en el periodo analizado 20
+    incidencias concentran el 47% del importe. Un único evento grande cayendo de un
+    lado u otro mueve el rate económico más que meses de trabajo, así que conviene
+    avisar antes de que alguien lea una variación como cambio de rendimiento.
+    """
+    rows = [
+        r for r in session.scalars(base_query(filters))
+        if r.revenue_loss is not None and r.revenue_loss > 0
+    ]
+    total = sum(r.revenue_loss for r in rows)
+    if not total:
+        return {"total": 0.0, "n": 0, "top_share": 0.0, "top1_share": 0.0, "items": []}
+    rows.sort(key=lambda r: r.revenue_loss, reverse=True)
+    head = rows[:top]
+    return {
+        "total": round(total, 2),
+        "n": len(rows),
+        "top_share": round(sum(r.revenue_loss for r in head) / total * 100, 1),
+        "top1_share": round(rows[0].revenue_loss / total * 100, 1),
+        "items": [
+            {
+                "plant": r.plant,
+                "country": r.country,
+                "date": r.start_date.isoformat(),
+                "equipment": r.equipment,
+                "is_mcc": r.is_mcc,
+                "ongoing": r.ongoing,
+                "revenue_loss": round(r.revenue_loss, 2),
+                "share": round(r.revenue_loss / total * 100, 1),
+            }
+            for r in head
+        ],
+    }
+
+
+def status_split(session: Session, filters: Filters) -> dict:
+    """
+    Reparto abierto/cerrado ignorando el filtro de estado.
+
+    Las WOs abiertas son el 17% del recuento pero cerca del 60% del importe, porque su
+    pérdida sigue acumulando. Mezclarlas compara importes provisionales con definitivos,
+    así que el frontend necesita este reparto para avisar.
+    """
+    unfiltered = Filters(**{**filters.__dict__, "status": None})
+    open_rows: list[WoScoped] = []
+    closed_rows: list[WoScoped] = []
+    for row in session.scalars(base_query(unfiltered)):
+        (open_rows if row.ongoing else closed_rows).append(row)
+
+    def revenue(rows: list[WoScoped]) -> float:
+        return sum(r.revenue_loss or 0 for r in rows)
+
+    total_rev = revenue(open_rows) + revenue(closed_rows)
+    total_n = len(open_rows) + len(closed_rows)
+    return {
+        "n_open": len(open_rows),
+        "n_closed": len(closed_rows),
+        "revenue_open": round(revenue(open_rows), 2),
+        "revenue_closed": round(revenue(closed_rows), 2),
+        "share_open_count": round(len(open_rows) / total_n * 100, 1) if total_n else 0.0,
+        "share_open_revenue": round(revenue(open_rows) / total_rev * 100, 1) if total_rev else 0.0,
+        "open": Metrics_from(open_rows),
+        "closed": Metrics_from(closed_rows),
+    }
+
+
+def Metrics_from(rows: list[WoScoped]) -> dict:
+    metrics = Metrics()
+    for row in rows:
+        metrics.add(row)
+    return metrics.as_dict()
+
+
 def excluded_breakdown(session: Session, filters: Filters) -> list[dict]:
     """
     Por qué queda fuera cada WO descartada.

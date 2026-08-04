@@ -462,3 +462,66 @@ class TestAPI:
         )
         excluded = client.get("/api/scope/excluded").json()
         assert any("telemetría" in item["reason"] for item in excluded)
+
+
+class TestConcentracionYEstado:
+    """
+    Los dos endpoints que alimentan los avisos de la vista de tendencia. Existen porque
+    sin ellos el rate económico se lee mal: lo mueven unos pocos eventos grandes y la
+    mezcla de WOs abiertas con cerradas compara provisionales con definitivas.
+    """
+
+    @pytest.fixture()
+    def poblado(self, session):
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(start="1 may 2026, 8:00", user="MCC", revenue="100000", description="gorda"),
+                row(start="2 may 2026, 8:00", user="O&M Contractor", revenue="100", description="a"),
+                row(start="3 may 2026, 8:00", user="O&M Contractor", revenue="100",
+                    ongoing="true", description="b"),
+            ),
+            filename="c.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        return session
+
+    def test_concentracion_detecta_el_evento_dominante(self, poblado):
+        conc = q.revenue_concentration(poblado, q.Filters(), top=1)
+        assert conc["n"] == 3
+        assert conc["top1_share"] == pytest.approx(99.8, abs=0.2)
+        assert conc["items"][0]["revenue_loss"] == pytest.approx(100000.0)
+
+    def test_concentracion_sin_importes(self, session):
+        ingest_csv(session, content=csv_bytes(row(revenue="")), filename="v.csv")
+        rebuild_scope(session)
+        conc = q.revenue_concentration(session, q.Filters())
+        assert conc["total"] == 0
+        assert conc["items"] == []
+
+    def test_status_split_ignora_el_filtro_de_estado(self, poblado):
+        # Aunque se filtre a cerradas, el reparto debe seguir viendo las dos partes:
+        # es lo que permite avisar de que se están mezclando.
+        split = q.status_split(poblado, q.Filters(status="closed"))
+        assert split["n_open"] == 1
+        assert split["n_closed"] == 2
+        assert split["share_open_count"] == pytest.approx(33.3, abs=0.1)
+
+    def test_status_split_expone_metricas_de_cada_parte(self, poblado):
+        split = q.status_split(poblado, q.Filters())
+        assert split["closed"]["wos"] == 2
+        assert split["open"]["wos"] == 1
+        assert split["closed"]["rate_wo"] == pytest.approx(50.0)
+
+    def test_endpoints_responden(self, client):
+        client.post(
+            "/api/ingest/wo-export",
+            files={"file": ("e.csv", csv_bytes(row(revenue="500")), "text/csv")},
+        )
+        conc = client.get("/api/kpis/revenue-concentration?top=3")
+        assert conc.status_code == 200
+        assert conc.json()["top1_share"] == pytest.approx(100.0)
+        split = client.get("/api/kpis/status-split")
+        assert split.status_code == 200
+        assert split.json()["n_closed"] == 1

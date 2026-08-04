@@ -154,6 +154,30 @@ def wos_missed(
     return q.missed_wos(session, filters, limit=limit, offset=offset)
 
 
+@app.get("/api/kpis/revenue-concentration", tags=["kpis"])
+def kpi_revenue_concentration(
+    top: int = Query(5, ge=1, le=50),
+    filters: q.Filters = Depends(filters_from_query),
+    session: Session = Depends(get_session),
+) -> dict:
+    """
+    Concentración del importe en las incidencias más caras.
+
+    Necesario para no leer una variación del rate económico como cambio de rendimiento
+    cuando en realidad la mueve un único evento grande.
+    """
+    return q.revenue_concentration(session, filters, top=top)
+
+
+@app.get("/api/kpis/status-split", tags=["kpis"])
+def kpi_status_split(
+    filters: q.Filters = Depends(filters_from_query),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Reparto abierto/cerrado, ignorando el filtro de estado, con sus métricas."""
+    return q.status_split(session, filters)
+
+
 @app.get("/api/scope/excluded", tags=["scope"])
 def scope_excluded(
     filters: q.Filters = Depends(filters_from_query),
