@@ -6,20 +6,39 @@ y el dashboard los pide a una API.
 
 ## Arrancar
 
+Copia el fichero de entorno y cambia la contraseña:
+
+```cmd
+copy .env.example .env
+```
 ```bash
-cp .env.example .env          # y cambia POSTGRES_PASSWORD
-docker compose up -d --build
+cp .env.example .env          # Linux/macOS/Git Bash
 ```
 
-Primera carga (crea el esquema, carga la referencia y los CSV de `data/incoming/`):
+Los puertos por defecto en `.env` son **8010** (API) y **55432** (Postgres), no 8000 ni
+5432: en una máquina de desarrollo esos dos suelen estar ocupados y el contenedor falla
+con `port is already allocated`. Si 8010 también choca, cámbialo ahí.
 
 ```bash
+docker compose up -d --build
 docker compose exec api python cli.py bootstrap
 ```
 
-- Dashboard: http://localhost:8000
-- API navegable: http://localhost:8000/docs
-- Estado: `curl localhost:8000/api/health`
+El `bootstrap` crea el esquema, carga la referencia, aplica las exclusiones de planta e
+ingesta los CSV que haya en `data/incoming/`.
+
+- Dashboard: http://localhost:8010
+- API navegable: http://localhost:8010/docs
+- Estado: http://localhost:8010/api/health
+
+### Si el puerto está ocupado
+
+```cmd
+netstat -ano | findstr :8010
+tasklist /FI "PID eq <el PID que salga>"
+```
+
+Cambia `API_PORT` en `.env` y vuelve a lanzar `docker compose up -d`.
 
 ## Cargar datos nuevos
 
