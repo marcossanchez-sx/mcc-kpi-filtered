@@ -1,0 +1,24 @@
+# Ajustes de desarrollo. Docker Compose lee este fichero automáticamente y lo combina
+# con docker-compose.yml, así que no hace falta indicarlo con -f.
+#
+# Existe por un problema real: el código de la API va COPIADO dentro de la imagen,
+# mientras que el frontend va montado como volumen. Al cambiar el backend,
+# `docker compose restart api` reutiliza la imagen vieja y el dashboard acaba pidiendo
+# endpoints que el contenedor no tiene — errores 404 desconcertantes.
+#
+# Montando el código y activando --reload, cualquier cambio en backend/app se aplica al
+# guardar, sin reconstruir nada.
+#
+# Para probar la imagen tal cual se desplegaría (sin montaje ni reload):
+#   docker compose -f docker-compose.yml up -d --build
+
+services:
+  api:
+    volumes:
+      - ./data:/data
+      - ./frontend:/frontend:ro
+      - ./backend/app:/srv/app:ro
+      - ./backend/cli.py:/srv/cli.py:ro
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --reload --reload-dir /srv/app

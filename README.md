@@ -31,6 +31,26 @@ ingesta los CSV que haya en `data/incoming/`.
 - API navegable: http://localhost:8010/docs
 - Estado: http://localhost:8010/api/health
 
+### He cambiado el backend y el dashboard da 404
+
+El código de la API va copiado dentro de la imagen, así que `docker compose restart api`
+reutiliza la imagen anterior. El frontend sí se actualiza al instante porque va montado
+como volumen, y acaba pidiendo endpoints que el contenedor todavía no tiene.
+
+`docker-compose.override.yml` monta el código y activa `--reload`, de modo que los
+cambios en `backend/app` se aplican al guardar. Compose lo lee automáticamente. Si el
+contenedor se creó antes de que existiera ese fichero, hace falta recrearlo una vez:
+
+```bash
+docker compose up -d --build
+```
+
+Para probar la imagen tal cual se desplegaría, sin montaje ni reload:
+
+```bash
+docker compose -f docker-compose.yml up -d --build
+```
+
 ### `password authentication failed for user "mcc"`
 
 Postgres fija la contraseña **sólo la primera vez** que inicializa su directorio de
