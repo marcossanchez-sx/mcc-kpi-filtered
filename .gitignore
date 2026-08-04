@@ -1,0 +1,24 @@
+# ── secretos y entorno ──
+.env
+
+# ── Python ──
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# ── bases de datos locales ──
+*.db
+*.db-journal
+
+# ── datos operativos: NUNCA al repositorio ──
+# Los exports y los ficheros de referencia contienen nombres de planta,
+# descripciones de incidencias, importes de pérdida y la matriz de visibilidad
+# SCADA. Es información operativa interna de Sonnedix y no debe salir del entorno
+# corporativo, ni siquiera a un repositorio privado personal.
+# En data/reference/ se versionan sólo las plantillas *.example.csv.
+data/incoming/*.csv
+data/processed/*.csv
+data/reference/*.csv
+!data/reference/*.example.csv

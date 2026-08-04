@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mcc-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mcc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mcc}
+      POSTGRES_DB: ${POSTGRES_DB:-mcc}
+    ports:
+      # Expuesto en local para poder conectar DBeaver/psql desde el host.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # La API no arranca hasta que Postgres acepta conexiones de verdad.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcc} -d ${POSTGRES_DB:-mcc}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    container_name: mcc-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mcc}:${POSTGRES_PASSWORD:-mcc}@db:5432/${POSTGRES_DB:-mcc}
+      DATA_DIR: /data
+      FRONTEND_DIR: /frontend
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Montados como volúmenes para poder soltar CSV nuevos sin reconstruir imagen.
+      - ./data:/data
+      - ./frontend:/frontend:ro
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCC Detection Rate</title>
+<script src="/static/chart.min.js"></script>
+<style>
+
+:root{
+  --bg:#0f1117; --card:#1c1e2a; --card2:#232635; --line:#2e3243;
+  --txt:#e8eaf0; --mut:#8b90a5; --dim:#5f647a;
+  --acc:#E8A020; --acc2:#f5c26b;
+  --ok:#3ec98a; --warn:#e8a020; --bad:#e05c5c; --info:#5b9bd5;
+  --r:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font:14px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif;
+     -webkit-font-smoothing:antialiased}
+.app{display:grid;grid-template-columns:224px 1fr;min-height:100vh}
+
+/* ── sidebar ── */
+.side{background:#12141d;border-right:1px solid var(--line);padding:22px 0;display:flex;flex-direction:column}
+.brand{padding:0 20px 20px;border-bottom:1px solid var(--line);margin-bottom:16px}
+.brand b{display:block;font-size:15px;letter-spacing:.3px}
+.brand span{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:1.4px}
+.navlab{padding:0 20px 8px;font-size:10px;text-transform:uppercase;letter-spacing:1.3px;color:var(--dim)}
+.nav{display:flex;flex-direction:column;gap:2px;padding:0 10px}
+.nav button{all:unset;cursor:pointer;display:flex;align-items:center;justify-content:space-between;
+  gap:8px;padding:9px 12px;border-radius:9px;font-size:13.5px;color:var(--mut);transition:.15s}
+.nav button:hover{background:#1a1d29;color:var(--txt)}
+.nav button.on{background:rgba(232,160,32,.13);color:var(--acc2);font-weight:600;
+  box-shadow:inset 2px 0 0 var(--acc)}
+.nav .bdg{font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--dim)}
+.nav button.on .bdg{color:var(--acc2)}
+.sfoot{margin-top:auto;padding:16px 20px 0;border-top:1px solid var(--line);font-size:11px;color:var(--dim)}
+
+/* ── main ── */
+.main{padding:26px 30px 50px;max-width:1500px}
+.top{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:24px}
+h1{font-size:23px;font-weight:650;letter-spacing:-.2px}
+.sub{color:var(--mut);font-size:13px;margin-top:5px}
+.ctrls{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.fg{display:flex;flex-direction:column;gap:5px}
+.fg label{font-size:10px;text-transform:uppercase;letter-spacing:1.1px;color:var(--dim);padding-left:2px}
+select{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:9px;
+  padding:8px 11px;font-size:13px;font-family:inherit;cursor:pointer;min-width:112px}
+select:focus{outline:none;border-color:var(--acc)}
+.seg{display:flex;background:var(--card);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{all:unset;cursor:pointer;padding:8px 14px;font-size:12.5px;color:var(--mut);transition:.15s}
+.seg button:hover{color:var(--txt)}
+.seg button.on{background:var(--acc);color:#17181f;font-weight:600}
+.seg.sm button{padding:5px 11px;font-size:11.5px}
+.nav .tbtn{flex-direction:column;align-items:stretch;gap:5px;padding:11px 12px}
+.nav .tbtn .tl{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13.5px}
+.nav .tbtn .tv{font-size:11.5px;line-height:1.35}
+
+/* ── kpis ── */
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:18px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:20px 20px 14px;
+  cursor:pointer;transition:.18s;position:relative;overflow:hidden}
+.kpi:hover{border-color:#3d4257;transform:translateY(-2px)}
+.kpi .kl{font-size:11px;text-transform:uppercase;letter-spacing:1.1px;color:var(--mut);margin-bottom:10px}
+.kpi .kv{font-size:34px;font-weight:660;letter-spacing:-1px;line-height:1;font-variant-numeric:tabular-nums}
+.kpi .kv small{font-size:17px;font-weight:500;color:var(--mut);margin-left:2px}
+.kpi .kd{display:flex;align-items:center;gap:7px;margin-top:9px;font-size:12px;color:var(--mut)}
+.chip{font-size:11px;font-weight:600;padding:2px 7px;border-radius:20px}
+.chip.up{background:rgba(62,201,138,.16);color:var(--ok)}
+.chip.dn{background:rgba(224,92,92,.16);color:var(--bad)}
+.chip.fl{background:rgba(139,144,165,.16);color:var(--mut)}
+.spark{margin-top:12px;height:34px;width:100%;display:block}
+.kacc{border-top:2px solid var(--acc)}
+
+/* ── panels ── */
+.grid2{display:grid;grid-template-columns:1.55fr 1fr;gap:16px;margin-bottom:18px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:20px 22px}
+.ph{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:12px}
+.ph h2{font-size:14.5px;font-weight:620}
+.ph .hint{font-size:11.5px;color:var(--dim)}
+.psub{font-size:12px;color:var(--mut);margin-bottom:16px}
+.cw{position:relative;height:290px}
+.cw.tall{height:400px}
+.cw.sm{height:250px}
+
+/* ── table ── */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);
+  padding:9px 10px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none;white-space:nowrap}
+th:hover{color:var(--mut)}
+th .ar{opacity:.45;font-size:9px}
+td{padding:10px;border-bottom:1px solid rgba(46,50,67,.55);vertical-align:middle}
+tbody tr{cursor:pointer;transition:.12s}
+tbody tr:hover{background:#22252f}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.bar{height:6px;border-radius:4px;background:#2b2f40;overflow:hidden;min-width:70px}
+.bar i{display:block;height:100%;border-radius:4px}
+.pg{display:flex;align-items:center;justify-content:space-between;margin-top:14px;font-size:12px;color:var(--mut)}
+.pg div{display:flex;gap:6px}
+.pg button{all:unset;cursor:pointer;padding:5px 11px;border:1px solid var(--line);border-radius:7px;
+  font-size:12px;color:var(--mut);transition:.15s}
+.pg button:hover:not(:disabled){border-color:var(--acc);color:var(--acc2)}
+.pg button:disabled{opacity:.32;cursor:not-allowed}
+
+
+/* ── iniciativas ── */
+.acc{display:grid;grid-template-columns:1fr 1fr;gap:9px;align-items:start}
+.grp{grid-column:1/-1;font-size:10px;text-transform:uppercase;letter-spacing:1.3px;
+  color:var(--dim);margin:6px 0 2px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.grp:first-child{margin-top:0}
+@media(max-width:1100px){.acc{grid-template-columns:1fr}}
+.item{background:var(--card2);border:1px solid var(--line);border-radius:11px;overflow:hidden;transition:.16s}
+.item:hover{border-color:#3d4257}
+.item.open{border-color:rgba(232,160,32,.42)}
+.ihead{display:flex;align-items:center;gap:13px;padding:14px 16px;cursor:pointer}
+.ihead .ic{font-size:11px;color:var(--dim);transition:transform .22s;width:10px;flex:0 0 10px}
+.item.open .ihead .ic{transform:rotate(90deg);color:var(--acc)}
+.ihead .it{font-size:13.5px;font-weight:560;flex:1}
+.st{font-size:10.5px;font-weight:650;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.6px;white-space:nowrap}
+.st.live{background:rgba(62,201,138,.15);color:var(--ok)}
+.st.prog{background:rgba(232,160,32,.15);color:var(--acc)}
+.st.plan{background:rgba(91,155,213,.15);color:var(--info)}
+.st.risk{background:rgba(224,92,92,.15);color:var(--bad)}
+.ibody{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.item.open .ibody{max-height:420px}
+.iin{padding:2px 16px 16px 39px;border-top:1px solid var(--line);margin-top:0}
+.iin p{font-size:13px;color:var(--mut);line-height:1.62;padding-top:13px}
+.imp{display:flex;gap:22px;margin-top:13px;flex-wrap:wrap}
+.imp div{font-size:11.5px;color:var(--dim)}
+.imp b{display:block;font-size:15px;color:var(--acc2);font-weight:640;margin-top:3px;font-variant-numeric:tabular-nums}
+
+/* ── veredicto de tendencia ── */
+.verdict{background:linear-gradient(135deg,var(--card) 0%,var(--card2) 100%);
+  border:1px solid var(--line);border-radius:var(--r);padding:24px 26px;margin-bottom:18px;
+  display:flex;align-items:center;gap:26px;flex-wrap:wrap}
+.verdict .arrow{font-size:44px;line-height:1;flex:0 0 auto}
+.verdict .vmain{flex:1;min-width:260px}
+.verdict h2{font-size:20px;font-weight:650;letter-spacing:-.3px;margin-bottom:6px}
+.verdict p{font-size:13px;color:var(--mut);line-height:1.6;max-width:760px}
+.verdict p.warn{margin-top:11px;padding:11px 13px;border-radius:9px;font-size:12.5px;
+  background:rgba(224,92,92,.09);border:1px solid rgba(224,92,92,.28);color:#e8b0b0}
+.verdict p.warn b{color:#f0c9c9}
+.verdict .vnums{display:flex;gap:26px;flex-wrap:wrap}
+.verdict .vnums div{font-size:10.5px;text-transform:uppercase;letter-spacing:1px;color:var(--dim)}
+.verdict .vnums b{display:block;font-size:24px;font-weight:650;margin-top:5px;
+  font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+
+/* ── explicaciones ── */
+.expl{margin-top:16px;padding-top:15px;border-top:1px solid var(--line);
+  font-size:12.5px;color:var(--mut);line-height:1.62}
+.expl b{color:var(--txt);font-weight:600}
+.expl .k{display:inline-flex;align-items:center;gap:6px;margin-right:14px;font-size:11.5px}
+.expl .k i{width:11px;height:11px;border-radius:3px;display:inline-block}
+.inl-warn{display:inline-block;margin-top:7px;padding:7px 11px;border-radius:8px;font-size:12px;
+  background:rgba(224,92,92,.09);border:1px solid rgba(224,92,92,.26);color:#e8b0b0;line-height:1.55}
+.inl-warn b{color:#f0c9c9}
+.gloss{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.gloss div{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:15px 17px}
+.gloss h4{font-size:12.5px;font-weight:620;margin-bottom:7px;color:var(--acc2)}
+.gloss p{font-size:12.5px;color:var(--mut);line-height:1.62}
+@media(max-width:1100px){.gloss{grid-template-columns:1fr}}
+
+/* ── modal ── */
+.ov{position:fixed;inset:0;background:rgba(6,7,11,.76);backdrop-filter:blur(3px);z-index:60;
+  display:none;align-items:flex-start;justify-content:center;padding:42px 20px;overflow-y:auto}
+.ov.on{display:flex}
+.mod{background:var(--card);border:1px solid #363b50;border-radius:16px;width:100%;max-width:1020px;
+  box-shadow:0 24px 70px rgba(0,0,0,.6)}
+.mh{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;
+  padding:22px 26px;border-bottom:1px solid var(--line)}
+.mh h3{font-size:17px;font-weight:640}
+.mh .ms{font-size:12.5px;color:var(--mut);margin-top:5px}
+.x{all:unset;cursor:pointer;font-size:22px;color:var(--dim);line-height:1;padding:0 4px}
+.x:hover{color:var(--txt)}
+.mb{padding:22px 26px 26px}
+.mstat{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.mstat div{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+.mstat span{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim)}
+.mstat b{display:block;font-size:22px;font-weight:640;margin-top:5px;font-variant-numeric:tabular-nums}
+.mt{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);
+  margin:22px 0 11px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+.mt:first-child{margin-top:0}
+.scroll{max-height:290px;overflow-y:auto}
+.scroll::-webkit-scrollbar{width:8px}
+.scroll::-webkit-scrollbar-thumb{background:#343850;border-radius:4px}
+.tag{font-size:10.5px;padding:2px 7px;border-radius:5px;background:#2c3040;color:var(--mut);white-space:nowrap}
+.tag.p{background:rgba(232,160,32,.13);color:var(--acc)}
+.tag.pf{background:rgba(139,110,232,.15);color:#a98ef0}
+.tag.c{background:rgba(91,155,213,.13);color:var(--info)}
+.dsc{color:var(--mut);font-size:12.5px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.empty{color:var(--dim);font-size:13px;padding:26px;text-align:center}
+@media(max-width:1500px){.kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:1300px){.kpis{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}}
+@media(max-width:900px){.app{grid-template-columns:1fr}.side{display:none}}
+
+/* añadidos de la versión servida por API */
+.err{background:rgba(224,92,92,.12);border:1px solid rgba(224,92,92,.4);color:#e8b0b0;
+  padding:13px 16px;border-radius:10px;margin-bottom:16px;font-size:13px}
+.loading{color:var(--dim);font-size:13px;padding:30px;text-align:center}
+.up{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.up input[type=file]{font-size:12px;color:var(--mut)}
+.btn{all:unset;cursor:pointer;padding:8px 15px;border-radius:9px;background:var(--acc);
+  color:#17181f;font-weight:600;font-size:12.5px}
+.btn:hover{background:var(--acc2)}
+.btn.sec{background:transparent;border:1px solid var(--line);color:var(--mut)}
+.btn.sec:hover{border-color:var(--acc);color:var(--acc2)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><b>MCC Detection Rate</b><span>Solar Operations Center</span></div>
+    <div class="navlab">Pa&iacute;ses</div>
+    <nav class="nav" id="nav"></nav>
+    <div class="navlab" style="margin-top:18px">Datos</div>
+    <div class="nav"><button id="adminBtn" class="tbtn"></button></div>
+    <div class="sfoot" id="sfoot">cargando&hellip;</div>
+  </aside>
+
+  <main class="main">
+    <div id="errBox"></div>
+    <div class="top">
+      <div>
+        <h1 id="title">Detection Rate</h1>
+        <div class="sub" id="subtitle">conectando con la API&hellip;</div>
+      </div>
+      <div class="ctrls">
+        <div class="fg"><label>Desde</label><select id="from"></select></div>
+        <div class="fg"><label>Hasta</label><select id="to"></select></div>
+        <div class="fg"><label>Portfolio</label><select id="pf"></select></div>
+        <div class="fg"><label>Contratista O&amp;M</label><select id="ctr"></select></div>
+        <div class="fg"><label>Estado</label><select id="st">
+          <option value="">Ambas</option><option value="closed">Solo cerradas</option>
+          <option value="open">Solo abiertas</option></select></div>
+        <div class="fg"><label>Tipo</label>
+          <div class="seg" id="typeSeg">
+            <button data-t="" class="on">Todas</button>
+            <button data-t="P">Production</button>
+            <button data-t="C">Comms</button>
+          </div></div>
+      </div>
+    </div>
+
+    <section id="mainView">
+      <div class="kpis" id="kpis"></div>
+      <div class="grid2">
+        <div class="panel">
+          <div class="ph"><h2>Evoluci&oacute;n semanal</h2>
+            <div class="seg sm" id="metSeg">
+              <button data-m="wo" class="on">Por WO</button>
+              <button data-m="rev">Por Revenue Loss</button>
+            </div></div>
+          <div class="psub" id="trendSub"></div>
+          <div class="cw"><canvas id="trend"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="ph"><h2>Por tipo de equipo</h2></div>
+          <div class="psub">WOs detectadas por el MCC frente a las abiertas por O&amp;M</div>
+          <div class="cw"><canvas id="equip"></canvas></div>
+        </div>
+      </div>
+      <div class="grid2" style="grid-template-columns:1fr 1.15fr">
+        <div class="panel">
+          <div class="ph"><h2 id="dimTitle">Detection rate por portfolio</h2>
+            <div class="seg sm" id="dimSeg">
+              <button data-d="portfolio" class="on">Portfolio</button>
+              <button data-d="contractor">Contratista</button>
+            </div></div>
+          <div class="psub" id="dimSub"></div>
+          <div class="cw tall"><canvas id="dimc"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="ph"><h2>Detection rate por planta</h2><span class="hint" id="ptot"></span></div>
+          <div class="psub">Click en una fila para ver sus WOs no detectadas</div>
+          <div style="min-height:400px"><table><thead><tr>
+            <th data-s="key">Planta</th><th class="num" data-s="wo_mcc">MCC</th>
+            <th class="num" data-s="wo_ext">O&amp;M</th><th class="num" data-s="rate_wo">Rate</th>
+            <th style="width:88px"></th></tr></thead><tbody id="ptb"></tbody></table></div>
+          <div class="pg"><span id="pinfo"></span><div>
+            <button id="pprev">&lsaquo; Anterior</button><button id="pnext">Siguiente &rsaquo;</button></div></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="ph"><h2>Por qu&eacute; el denominador es este</h2>
+          <span class="hint">WOs descartadas y su motivo</span></div>
+        <div class="psub">Cada regla quita del c&aacute;lculo algo que el MCC no pod&iacute;a detectar</div>
+        <div id="excl"></div>
+      </div>
+    </section>
+
+    <section id="adminView" style="display:none">
+      <div class="panel" style="margin-bottom:16px">
+        <div class="ph"><h2>Cargar un export</h2></div>
+        <div class="psub">Reprocesar el mismo fichero no duplica nada. Tras la carga el scope se recalcula solo.</div>
+        <div class="up">
+          <input type="file" id="woFile" accept=".csv">
+          <button class="btn" id="woUp">Subir export de Work Orders</button>
+          <button class="btn sec" id="rebuild">Recalcular scope</button>
+        </div>
+        <div id="upResult" style="margin-top:14px"></div>
+      </div>
+      <div class="panel" style="margin-bottom:16px">
+        <div class="ph"><h2>Reatribuciones detectadas</h2>
+          <span class="hint" id="acTotal"></span></div>
+        <div class="psub">Incidencias que cambiaron de MCC a O&amp;M o al rev&eacute;s entre exports.
+          Implica que el rate de un periodo puede cambiar seg&uacute;n cu&aacute;ndo se exporte.</div>
+        <div id="acBox"></div>
+      </div>
+      <div class="panel">
+        <div class="ph"><h2>Ficheros cargados</h2></div>
+        <div class="psub">Cada export queda como snapshot inmutable</div>
+        <div id="filesBox"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="ov" id="ov"><div class="mod">
+  <div class="mh"><div><h3 id="mtitle"></h3><div class="ms" id="msub"></div></div>
+    <button class="x" id="mx">&times;</button></div>
+  <div class="mb" id="mbody"></div>
+</div></div>
+<script>
+/* ═══ Cliente de la API ═══
+   Los datos ya no van embebidos: se piden al backend en cada cambio de filtro.
+   Eso es lo que elimina los HTML de 700 KB por versión. */
+const API = "";                       // mismo origen: lo sirve el propio backend
+
+const S = {view:"main", metric:"wo", dim:"portfolio",
+           from:null, to:null, country:"", portfolio:"", contractor:"",
+           type:"", status:"", sort:"wo_ext", dir:-1, page:0, per:9};
+const PER = 9;
+let META = null;
+let cache = {};                        // respuestas de la petición en curso
+
+/* ── utilidades ── */
+const MN={"01":"Ene","02":"Feb","03":"Mar","04":"Abr","05":"May","06":"Jun",
+          "07":"Jul","08":"Ago","09":"Sep","10":"Oct","11":"Nov","12":"Dic"};
+const ml = m => m ? MN[m.slice(5)]+" "+m.slice(0,4) : "—";
+const esc = s => String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const rc = r => r==null ? "var(--dim)" : r>=70 ? "var(--ok)" : r>=45 ? "var(--warn)" : "var(--bad)";
+const MU = v => v==null ? "—" : v>=1e6 ? (v/1e6).toFixed(2)+" M" : v>=1e3 ? (v/1e3).toFixed(1)+" k" : Math.round(v);
+const HU = v => v==null ? "—" : v<1 ? Math.round(v*60)+" min" : v<48 ? v.toFixed(1)+" h" : (v/24).toFixed(1)+" d";
+const REV = () => S.metric==="rev";
+const fd = d => { const [y,m,dd]=d.split("-"); return dd+" "+MN[m]; };
+
+function qs(extra){
+  const p = new URLSearchParams();
+  if(S.from) p.set("from",S.from);
+  if(S.to) p.set("to",S.to);
+  if(S.country) p.set("country",S.country);
+  if(S.portfolio) p.set("portfolio",S.portfolio);
+  if(S.contractor) p.set("contractor",S.contractor);
+  if(S.type) p.set("incident_type",S.type);
+  if(S.status) p.set("status",S.status);
+  for(const [k,v] of Object.entries(extra||{})) if(v!=null&&v!=="") p.set(k,v);
+  return p.toString();
+}
+
+let errTimer=null;
+function showError(message){
+  const box=document.getElementById("errBox");
+  box.innerHTML=`<div class="err"><b>No se pudo cargar:</b> ${esc(message)}<br>
+    <span style="color:var(--mut)">Comprueba que el backend responde en <code>/api/health</code>.</span></div>`;
+  clearTimeout(errTimer); errTimer=setTimeout(()=>{box.innerHTML="";},12000);
+}
+
+async function api(path, params){
+  const url = API + path + (params ? "?"+params : "");
+  const response = await fetch(url);
+  if(!response.ok){
+    let detail = response.statusText;
+    try { detail = (await response.json()).detail || detail; } catch {}
+    throw new Error(`${response.status} — ${detail}`);
+  }
+  return response.json();
+}
+
+/* ── selectores ── */
+function fillSelect(id, values, current, labelFn){
+  const sel=document.getElementById(id);
+  sel.innerHTML = values.map(v=>{
+    const value = typeof v==="object" ? v.value : v;
+    const label = labelFn ? labelFn(v) : (typeof v==="object" ? v.label : v);
+    return `<option value="${esc(value)}"${value===current?" selected":""}>${esc(label)}</option>`;
+  }).join("");
+}
+
+function initControls(){
+  const months=META.months;
+  S.from ??= months[0]; S.to ??= months[months.length-1];
+  fillSelect("from",months,S.from,ml); fillSelect("to",months,S.to,ml);
+  document.getElementById("from").onchange=e=>{
+    S.from=e.target.value; if(S.from>S.to){S.to=S.from;document.getElementById("to").value=S.to;}
+    S.page=0; render();
+  };
+  document.getElementById("to").onchange=e=>{
+    S.to=e.target.value; if(S.to<S.from){S.from=S.to;document.getElementById("from").value=S.from;}
+    S.page=0; render();
+  };
+  fillSelect("pf",[{value:"",label:"Todos"}].concat(META.portfolios.map(p=>{
+    const n=(META.pf_countries[p]||[]).length;
+    return {value:p,label:p+(n>1?` (${n} países)`:"")};
+  })),S.portfolio);
+  document.getElementById("pf").onchange=e=>{S.portfolio=e.target.value;S.page=0;render();};
+  fillSelect("ctr",[{value:"",label:"Todos"}].concat(META.contractors.map(c=>{
+    const v=(META.ctr_variants[c]||[]).length;
+    return {value:c,label:c+(v>1?` (${v} nombres)`:"")};
+  })),S.contractor);
+  document.getElementById("ctr").onchange=e=>{S.contractor=e.target.value;S.page=0;render();};
+  document.getElementById("st").onchange=e=>{S.status=e.target.value;S.page=0;render();};
+  document.querySelectorAll("#typeSeg button").forEach(b=>b.onclick=()=>{
+    S.type=b.dataset.t;
+    document.querySelectorAll("#typeSeg button").forEach(x=>x.classList.toggle("on",x===b));
+    S.page=0; render();
+  });
+  document.querySelectorAll("#metSeg button").forEach(b=>b.onclick=()=>{
+    S.metric=b.dataset.m;
+    document.querySelectorAll("#metSeg button").forEach(x=>x.classList.toggle("on",x===b));
+    render();
+  });
+  document.querySelectorAll("#dimSeg button").forEach(b=>b.onclick=()=>{
+    S.dim=b.dataset.d;
+    document.querySelectorAll("#dimSeg button").forEach(x=>x.classList.toggle("on",x===b));
+    render();
+  });
+  document.querySelectorAll("th[data-s]").forEach(th=>th.onclick=()=>{
+    const k=th.dataset.s;
+    if(S.sort===k) S.dir*=-1; else {S.sort=k; S.dir=k==="key"?1:-1;}
+    S.page=0; renderTable();
+  });
+  document.getElementById("pprev").onclick=()=>{if(S.page>0){S.page--;renderTable();}};
+  document.getElementById("pnext").onclick=()=>{S.page++;renderTable();};
+  document.getElementById("adminBtn").onclick=()=>{
+    S.view = S.view==="admin" ? "main" : "admin"; render();
+  };
+  document.getElementById("mx").onclick=closeModal;
+  document.getElementById("ov").onclick=e=>{if(e.target.id==="ov")closeModal();};
+  document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModal();});
+  document.getElementById("woUp").onclick=uploadExport;
+  document.getElementById("rebuild").onclick=async()=>{
+    const out=document.getElementById("upResult");
+    out.innerHTML='<div class="loading">recalculando…</div>';
+    try{
+      const r=await postJson("/api/scope/rebuild");
+      out.innerHTML=`<div class="expl">Scope recalculado: <b>${r.in_scope}</b> en scope, ${r.excluded} fuera.</div>`;
+      cache={}; await loadMeta(); render();
+    }catch(err){ out.innerHTML=`<div class="err">${esc(err.message)}</div>`; }
+  };
+}
+
+async function postJson(path, body){
+  const response=await fetch(API+path,{method:"POST",body:body});
+  if(!response.ok){
+    let detail=response.statusText;
+    try{ detail=(await response.json()).detail||detail; }catch{}
+    throw new Error(`${response.status} — ${detail}`);
+  }
+  return response.json();
+}
+
+async function uploadExport(){
+  const input=document.getElementById("woFile");
+  const out=document.getElementById("upResult");
+  if(!input.files.length){ out.innerHTML='<div class="err">Elige un fichero CSV primero.</div>'; return; }
+  const form=new FormData(); form.append("file",input.files[0]);
+  document.getElementById("woUp").disabled=true;
+  out.innerHTML='<div class="loading">cargando y recalculando el scope…</div>';
+  try{
+    const r=await postJson("/api/ingest/wo-export",form);
+    out.innerHTML = r.already_loaded
+      ? `<div class="expl">Ese fichero ya estaba cargado (${r.rows_total} filas), no se ha duplicado nada.</div>`
+      : `<div class="expl"><b>${r.rows_inserted}</b> de ${r.rows_total} filas cargadas
+         · periodo ${r.period_start} a ${r.period_end}
+         ${r.attribution_changes?`· <b style="color:var(--bad)">${r.attribution_changes} reatribuciones</b>`:""}
+         ${r.scope?`<br>Scope: <b>${r.scope.in_scope}</b> en scope, ${r.scope.excluded} fuera.`:""}</div>`;
+    cache={}; await loadMeta(); render();
+  }catch(err){ out.innerHTML=`<div class="err">${esc(err.message)}</div>`; }
+  finally{ document.getElementById("woUp").disabled=false; }
+}
+</script>
+<script>
+/* ═══ Render ═══ */
+Chart.defaults.font.family='"Segoe UI",system-ui,sans-serif';
+Chart.defaults.color='#8b90a5';
+const TT={backgroundColor:"#12141d",borderColor:"#363b50",borderWidth:1,titleColor:"#e8eaf0",
+  bodyColor:"#c4c8d6",padding:11,cornerRadius:8,boxPadding:4};
+let chT=null,chE=null,chD=null;
+
+function spark(values,color){
+  const v=values.filter(x=>x!=null);
+  if(v.length<2) return '<svg class="spark"></svg>';
+  const W=200,H=34,pad=3,mn=Math.min(...v),mx=Math.max(...v),sp=(mx-mn)||1;
+  const pts=v.map((x,i)=>[pad+(i/(v.length-1))*(W-pad*2), H-pad-((x-mn)/sp)*(H-pad*2)]);
+  const line=pts.map((p,i)=>(i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ");
+  const id="g"+Math.random().toString(36).slice(2,8);
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${color}" stop-opacity=".32"/>
+      <stop offset="100%" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${line} L${pts.at(-1)[0].toFixed(1)} ${H} L${pts[0][0].toFixed(1)} ${H} Z" fill="url(#${id})"/>
+    <path d="${line}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round"/></svg>`;
+}
+
+function renderNav(byCountry){
+  const total=byCountry.reduce((s,c)=>s+c.wos,0);
+  const mcc=byCountry.reduce((s,c)=>s+c.wo_mcc,0);
+  const globalRate=total?+(mcc/total*100).toFixed(1):null;
+  const map=Object.fromEntries(byCountry.map(c=>[c.key,c]));
+  let html=`<button data-c="" class="${S.country?"":"on"}">
+    <span>Todos los países</span><span class="bdg">${globalRate==null?"—":globalRate+"%"}</span></button>`;
+  for(const country of META.countries){
+    const c=map[country];
+    html+=`<button data-c="${esc(country)}" class="${S.country===country?"on":""}"${c?"":' style="opacity:.4"'}>
+      <span>${esc(country)}</span><span class="bdg">${c?c.rate_wo+"%":"—"}</span></button>`;
+  }
+  const nav=document.getElementById("nav");
+  nav.innerHTML=html;
+  nav.querySelectorAll("button").forEach(b=>b.onclick=()=>{
+    S.country=b.dataset.c; S.page=0; render();
+  });
+  const btn=document.getElementById("adminBtn");
+  btn.classList.toggle("on",S.view==="admin");
+  btn.innerHTML=`<span class="tl"><span>Cargas y auditoría</span></span>
+    <span class="tv" style="color:var(--dim)">subir exports, ver reatribuciones</span>`;
+}
+
+function renderKpis(sum, monthly){
+  const rev=REV();
+  const value = rev ? sum.rate_revenue : sum.rate_wo;
+  const totalLabel = rev ? "Pérdida total" : "WOs en scope";
+  const totalValue = rev ? MU(sum.revenue_total)+" €" : sum.wos;
+  document.getElementById("kpis").innerHTML=`
+  <div class="kpi kacc" data-k="rate">
+    <div class="kl">Detection Rate${rev?" (por €)":""}</div>
+    <div class="kv" style="color:${rc(value)}">${value==null?"—":value}<small>%</small></div>
+    <div class="kd"><span>${rev?`cobertura del importe ${sum.revenue_coverage}%`:`${sum.plants} plantas`}</span></div>
+    ${spark(monthly.map(m=>rev?m.rate_revenue:m.rate_wo),"var(--acc)")}</div>
+
+  <div class="kpi" data-k="tot">
+    <div class="kl">${totalLabel}</div>
+    <div class="kv">${totalValue}</div>
+    <div class="kd"><span>${ml(S.from)} – ${ml(S.to)}</span></div>
+    ${spark(monthly.map(m=>rev?m.revenue_total:m.wos),"var(--info)")}</div>
+
+  <div class="kpi" data-k="mcc">
+    <div class="kl">${rev?"Pérdida detectada":"Detectadas por MCC"}</div>
+    <div class="kv" style="color:var(--ok)">${rev?MU(sum.revenue_mcc)+" €":sum.wo_mcc}</div>
+    <div class="kd"><span>${rev?"antes que el contratista":"antes que el contratista"}</span></div>
+    ${spark(monthly.map(m=>rev?m.revenue_mcc:m.wo_mcc),"var(--ok)")}</div>
+
+  <div class="kpi" data-k="det">
+    <div class="kl">Mediana de detección</div>
+    <div class="kv" style="color:var(--ok)">${HU(sum.detection_median_mcc)}</div>
+    <div class="kd"><span>O&M: ${HU(sum.detection_median_ext)} · ${sum.detection_coverage}% con dato</span></div>
+    ${spark(monthly.map(m=>m.detection_median_mcc),"var(--info)")}</div>
+
+  <div class="kpi" data-k="ext">
+    <div class="kl">${rev?"Pérdida no detectada":"No detectadas (O&amp;M primero)"}</div>
+    <div class="kv" style="color:var(--bad)">${rev?MU(sum.revenue_ext)+" €":sum.wo_ext}</div>
+    <div class="kd"><span>lista accionable en el detalle</span></div>
+    ${spark(monthly.map(m=>rev?m.revenue_ext:m.wo_ext),"var(--bad)")}</div>`;
+  document.querySelectorAll(".kpi").forEach(k=>k.onclick=()=>openKpi(k.dataset.k,sum));
+}
+
+function renderTrend(series){
+  const rev=REV();
+  document.getElementById("trendSub").innerHTML = rev
+    ? "Detection rate ponderado por importe en euros"
+    : "Detection rate por semana y volumen de WOs (MCC vs O&amp;M)";
+  const ctx=document.getElementById("trend");
+  if(chT) chT.destroy();
+  chT=new Chart(ctx,{data:{labels:series.map(p=>fd(p.period)),datasets:[
+    {type:"bar",label:rev?"MCC (€)":"MCC",yAxisID:"y1",order:3,borderRadius:3,barPercentage:.72,
+     backgroundColor:"rgba(62,201,138,.62)",data:series.map(p=>rev?p.revenue_mcc:p.wo_mcc)},
+    {type:"bar",label:rev?"O&M (€)":"O&M",yAxisID:"y1",order:3,borderRadius:3,barPercentage:.72,
+     backgroundColor:"rgba(224,92,92,.58)",data:series.map(p=>rev?p.revenue_ext:p.wo_ext)},
+    {type:"line",label:"Detection rate",yAxisID:"y",order:1,borderColor:"#E8A020",borderWidth:2.6,
+     pointBackgroundColor:"#E8A020",pointBorderColor:"#12141d",pointBorderWidth:2,pointRadius:4,
+     pointHoverRadius:7,tension:.32,spanGaps:true,
+     data:series.map(p=>rev?p.rate_revenue:p.rate_wo)}]},
+  options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+    onClick:(e,el)=>{if(el.length) openWeek(series[el[0].index]);},
+    onHover:(e,el)=>{e.native.target.style.cursor=el.length?"pointer":"default";},
+    plugins:{legend:{position:"top",align:"end",labels:{boxWidth:11,boxHeight:11,usePointStyle:true,
+        pointStyle:"rectRounded",padding:15,font:{size:11.5}}},
+      tooltip:{...TT,callbacks:{
+        title:it=>"Semana del "+it[0].label,
+        label:c=>c.dataset.label==="Detection rate"
+          ? "  Detection rate: "+(c.raw==null?"—":c.raw+"%")
+          : "  "+c.dataset.label+": "+(rev?MU(c.raw)+" €":c.raw+" WOs"),
+        afterBody:it=>["  Total: "+series[it[0].dataIndex].wos+" WOs"]}}},
+    scales:{y:{min:0,max:100,grid:{color:"rgba(46,50,67,.5)"},ticks:{callback:v=>v+"%",font:{size:11}},
+        title:{display:true,text:"Detection rate",color:"#E8A020",font:{size:11}}},
+      y1:{position:"right",beginAtZero:true,grid:{display:false},
+        ticks:{precision:0,font:{size:11},callback:v=>rev?MU(v):v},
+        title:{display:true,text:rev?"Revenue Loss (€)":"WOs",font:{size:11}}},
+      x:{grid:{display:false},ticks:{maxRotation:0,autoSkipPadding:14,font:{size:10.5}}}}}});
+}
+
+function renderEquip(rows){
+  const ctx=document.getElementById("equip");
+  if(chE) chE.destroy();
+  chE=new Chart(ctx,{type:"bar",data:{labels:rows.map(r=>r.key),datasets:[
+    {label:"MCC",data:rows.map(r=>r.wo_mcc),backgroundColor:"rgba(62,201,138,.72)",stack:"s",borderRadius:4},
+    {label:"O&M",data:rows.map(r=>r.wo_ext),backgroundColor:"rgba(224,92,92,.68)",stack:"s",borderRadius:4}]},
+  options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,
+    onClick:(e,el)=>{if(el.length) openDim("equipment",rows[el[0].index]);},
+    onHover:(e,el)=>{e.native.target.style.cursor=el.length?"pointer":"default";},
+    plugins:{legend:{position:"top",align:"end",labels:{boxWidth:11,boxHeight:11,usePointStyle:true,
+        pointStyle:"rectRounded",padding:15,font:{size:11.5}}},
+      tooltip:{...TT,callbacks:{afterBody:it=>{const r=rows[it[0].dataIndex];
+        return ["  Total: "+r.wos,"  Rate: "+(r.rate_wo==null?"—":r.rate_wo+"%")];}}}},
+    scales:{x:{stacked:true,beginAtZero:true,grid:{color:"rgba(46,50,67,.5)"},ticks:{precision:0}},
+      y:{stacked:true,grid:{display:false},ticks:{font:{size:11.5}}}}}});
+}
+
+function renderDim(rows){
+  const isCtr=S.dim==="contractor";
+  document.getElementById("dimTitle").textContent =
+    isCtr ? "Detection rate por contratista" : "Detection rate por portfolio";
+  document.getElementById("dimSub").innerHTML = isCtr
+    ? "Los nombres se agrupan por grupo empresarial; el valor original se conserva en el dato"
+    : "Los portfolios cruzan países — Toro 1 y Toro 2 agrupan activos de varios mercados";
+  const cur = isCtr ? S.contractor : S.portfolio;
+  const countries = k => (isCtr ? META.ctr_countries : META.pf_countries)[k] || [];
+  const label = k => countries(k).length>1 ? `${k}  ⁽${countries(k).length} países⁾` : k;
+  const rev=REV();
+  const ctx=document.getElementById("dimc");
+  if(chD) chD.destroy();
+  chD=new Chart(ctx,{type:"bar",data:{labels:rows.map(r=>label(r.key)),datasets:[
+    {label:rev?"MCC (€)":"MCC",stack:"s",borderRadius:4,
+     data:rows.map(r=>rev?r.revenue_mcc:r.wo_mcc),
+     backgroundColor:rows.map(r=>!cur||cur===r.key?"rgba(62,201,138,.78)":"rgba(62,201,138,.2)")},
+    {label:rev?"O&M (€)":"O&M",stack:"s",borderRadius:4,
+     data:rows.map(r=>rev?r.revenue_ext:r.wo_ext),
+     backgroundColor:rows.map(r=>!cur||cur===r.key?"rgba(224,92,92,.7)":"rgba(224,92,92,.18)")}]},
+  options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,
+    onClick:(e,el)=>{ if(!el.length) return;
+      const k=rows[el[0].index].key;
+      if(isCtr){ S.contractor = S.contractor===k?"":k; document.getElementById("ctr").value=S.contractor; }
+      else { S.portfolio = S.portfolio===k?"":k; document.getElementById("pf").value=S.portfolio; }
+      S.page=0; render(); },
+    onHover:(e,el)=>{e.native.target.style.cursor=el.length?"pointer":"default";},
+    plugins:{legend:{position:"top",align:"end",labels:{boxWidth:11,boxHeight:11,usePointStyle:true,
+        pointStyle:"rectRounded",padding:15,font:{size:11.5}}},
+      tooltip:{...TT,callbacks:{title:it=>rows[it[0].dataIndex].key,
+        label:c=>"  "+c.dataset.label+": "+(rev?MU(c.raw)+" €":c.raw+" WOs"),
+        afterBody:it=>{const r=rows[it[0].dataIndex];
+          return ["  "+r.wos+" WOs · rate "+(r.rate_wo??"—")+"%",
+                  "  Importe: "+MU(r.revenue_total)+" € · rate € "+(r.rate_revenue??"—")+"%",
+                  "  Países: "+countries(r.key).join(", ")];}}}},
+    scales:{x:{stacked:true,beginAtZero:true,grid:{color:"rgba(46,50,67,.5)"},
+        ticks:{precision:0,callback:v=>rev?MU(v):v}},
+      y:{stacked:true,grid:{display:false},ticks:{font:{size:11},autoSkip:false}}}}});
+}
+
+let plantRows=[];
+function renderTable(){
+  const arr=[...plantRows].sort((a,b)=>{
+    let x=a[S.sort],y=b[S.sort];
+    if(x==null)x=-1; if(y==null)y=-1;
+    return typeof x==="string" ? S.dir*x.localeCompare(y) : S.dir*(x-y);
+  });
+  const pages=Math.max(1,Math.ceil(arr.length/PER));
+  if(S.page>=pages) S.page=pages-1;
+  const slice=arr.slice(S.page*PER,(S.page+1)*PER);
+  document.getElementById("ptot").textContent=arr.length+" plantas con actividad";
+  document.getElementById("ptb").innerHTML = slice.length ? slice.map(p=>`
+    <tr data-p="${esc(p.key)}">
+      <td><b>${esc(p.key)}</b></td>
+      <td class="num" style="color:var(--ok)">${p.wo_mcc}</td>
+      <td class="num" style="color:${p.wo_ext?"var(--bad)":"var(--dim)"}">${p.wo_ext}</td>
+      <td class="num" style="color:${rc(p.rate_wo)};font-weight:600">${p.rate_wo==null?"—":p.rate_wo+"%"}</td>
+      <td><div class="bar"><i style="width:${p.rate_wo||0}%;background:${rc(p.rate_wo)}"></i></div></td>
+    </tr>`).join("") : `<tr><td colspan="5" class="empty">Sin datos para este filtro</td></tr>`;
+  document.querySelectorAll("#ptb tr[data-p]").forEach(r=>r.onclick=()=>openPlant(r.dataset.p));
+  document.getElementById("pinfo").textContent = arr.length
+    ? `${S.page*PER+1}–${Math.min((S.page+1)*PER,arr.length)} de ${arr.length}` : "—";
+  document.getElementById("pprev").disabled = S.page===0;
+  document.getElementById("pnext").disabled = S.page>=pages-1;
+}
+
+function renderExcluded(rows){
+  const total=rows.reduce((s,r)=>s+r.wos,0);
+  document.getElementById("excl").innerHTML = rows.length ? `
+    <table><thead><tr><th>Motivo</th><th class="num">WOs</th><th style="width:220px"></th></tr></thead>
+    <tbody>${rows.map(r=>`<tr style="cursor:default">
+      <td>${esc(r.reason)}</td><td class="num">${r.wos}</td>
+      <td><div class="bar"><i style="width:${(r.wos/total*100).toFixed(1)}%;background:var(--mut)"></i></div></td>
+    </tr>`).join("")}</tbody></table>
+    <div class="expl">Estas <b>${total}</b> WOs no entran en el cálculo. Cada motivo corresponde a algo que
+    el MCC no podía detectar: plantas sin onboarding, equipos sin telemetría, causas externas o dispositivos
+    sin visibilidad en SCADA. Sin estos filtros el rate castigaría al MCC por cosas fuera de su alcance.</div>`
+    : `<div class="empty">Sin WOs descartadas</div>`;
+}
+</script>
+<script>
+/* ═══ Drill-downs ═══ */
+const ov=document.getElementById("ov");
+function closeModal(){ ov.classList.remove("on"); }
+function showModal(title,sub,html){
+  document.getElementById("mtitle").textContent=title;
+  document.getElementById("msub").textContent=sub;
+  document.getElementById("mbody").innerHTML=html;
+  ov.classList.add("on");
+}
+const ctxLabel=()=>[S.country||"Todos los países",
+  S.portfolio&&"Portfolio: "+S.portfolio, S.contractor&&"O&M: "+S.contractor,
+  S.status==="open"?"solo abiertas":S.status==="closed"?"solo cerradas":null,
+  ml(S.from)+" – "+ml(S.to)].filter(Boolean).join(" · ");
+
+function statBlock(s){
+  return `<div class="mstat">
+    <div><span>Rate por WO</span><b style="color:${rc(s.rate_wo)}">${s.rate_wo??"—"}%</b></div>
+    <div><span>WOs</span><b>${s.wos}</b></div>
+    <div><span>Rate por €</span><b style="color:${rc(s.rate_revenue)}">${s.rate_revenue??"—"}%</b></div>
+    <div><span>No detectadas</span><b style="color:var(--bad)">${s.wo_ext}</b></div></div>`;
+}
+function missedTable(items){
+  if(!items.length) return `<div class="empty">Ninguna WO sin detectar en esta selección 🎉</div>`;
+  return `<div class="scroll"><table><thead><tr><th>Fecha</th><th>Planta</th><th>Contratista</th>
+    <th>Equipo</th><th>Tipo</th><th>Estado</th><th>Descripción</th></tr></thead><tbody>
+    ${items.map(w=>`<tr style="cursor:default">
+      <td style="white-space:nowrap;color:var(--mut)">${fd(w.date)}</td>
+      <td><b>${esc(w.plant)}</b></td>
+      <td><span class="tag">${esc(w.contractor)}</span></td>
+      <td><span class="tag">${esc(w.equipment)}</span></td>
+      <td><span class="tag ${w.incident_type==="P"?"p":"c"}">${w.incident_type==="P"?"Production":"Comms"}</span></td>
+      <td><span class="tag"${w.ongoing?' style="background:rgba(224,92,92,.13);color:var(--bad)"':''}>${w.ongoing?"Abierta":"Cerrada"}</span></td>
+      <td><span class="dsc" title="${esc(w.description)}">${w.description?esc(w.description):"—"}</span></td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+function dimTable(rows,label){
+  if(rows.length<2) return "";
+  return `<div class="mt">Desglose por ${label}</div><div class="scroll"><table><thead><tr>
+    <th>${label}</th><th class="num">MCC</th><th class="num">O&M</th><th class="num">Rate</th>
+    <th style="width:100px"></th></tr></thead><tbody>${rows.map(r=>`<tr style="cursor:default">
+    <td><b>${esc(r.key)}</b></td>
+    <td class="num" style="color:var(--ok)">${r.wo_mcc}</td>
+    <td class="num" style="color:${r.wo_ext?"var(--bad)":"var(--dim)"}">${r.wo_ext}</td>
+    <td class="num" style="color:${rc(r.rate_wo)};font-weight:600">${r.rate_wo??"—"}%</td>
+    <td><div class="bar"><i style="width:${r.rate_wo||0}%;background:${rc(r.rate_wo)}"></i></div></td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+async function openKpi(kind, sum){
+  const titles={rate:"Detection Rate",tot:"Volumen en scope",mcc:"Detectadas por el MCC",
+                det:"Tiempo de detección",ext:"No detectadas por el MCC"};
+  showModal(titles[kind]||kind, ctxLabel(), '<div class="loading">cargando detalle…</div>');
+  try{
+    if(kind==="det"){
+      const [byEquip,byCountry,byCtr]=await Promise.all([
+        api("/api/kpis/by/equipment",qs()), api("/api/kpis/by/country",qs()),
+        api("/api/kpis/by/contractor",qs())]);
+      const detRows=(rows,label)=>`<div class="mt">Mediana por ${label}</div><div class="scroll"><table>
+        <thead><tr><th>${label}</th><th class="num">WOs</th><th class="num">MCC</th>
+        <th class="num">O&M</th><th class="num">Conjunta</th></tr></thead><tbody>
+        ${rows.map(r=>`<tr style="cursor:default"><td><b>${esc(r.key)}</b></td>
+          <td class="num">${r.wos}</td>
+          <td class="num" style="color:var(--ok)">${HU(r.detection_median_mcc)}</td>
+          <td class="num" style="color:var(--bad)">${HU(r.detection_median_ext)}</td>
+          <td class="num">${HU(r.detection_median_all)}</td></tr>`).join("")}</tbody></table></div>`;
+      document.getElementById("mbody").innerHTML=`<div class="mstat">
+        <div><span>Mediana MCC</span><b style="color:var(--ok)">${HU(sum.detection_median_mcc)}</b></div>
+        <div><span>Mediana O&M</span><b style="color:var(--bad)">${HU(sum.detection_median_ext)}</b></div>
+        <div><span>Conjunta</span><b>${HU(sum.detection_median_all)}</b></div>
+        <div><span>Cobertura</span><b>${sum.detection_coverage}%</b></div></div>
+        <p style="font-size:13px;color:var(--mut);line-height:1.62">Horas entre el inicio de la incidencia
+        (<b>Start Ts</b>) y la creación de la orden (<b>WO Created Ts</b>). Se usa la mediana porque la
+        distribución tiene colas muy largas. Las WOs creadas antes del inicio, que son inconsistencias del
+        origen, quedan fuera.</p>
+        ${detRows(byEquip,"equipo")}${detRows(byCountry,"país")}${detRows(byCtr,"contratista")}`;
+      return;
+    }
+    const [byPf,byCtr,byCountry,missed]=await Promise.all([
+      api("/api/kpis/by/portfolio",qs()), api("/api/kpis/by/contractor",qs()),
+      api("/api/kpis/by/country",qs()), api("/api/wos/missed",qs({limit:600}))]);
+    document.getElementById("mbody").innerHTML = statBlock(sum)
+      + dimTable(byPf,"portfolio") + dimTable(byCtr,"contratista") + dimTable(byCountry,"país")
+      + `<div class="mt">WOs abiertas por O&M sin detección previa (${missed.total})</div>`
+      + missedTable(missed.items);
+  }catch(err){
+    document.getElementById("mbody").innerHTML=`<div class="err">${esc(err.message)}</div>`;
+  }
+}
+
+async function openPlant(plant){
+  showModal(plant, ctxLabel(), '<div class="loading">cargando…</div>');
+  try{
+    const params=qs({});
+    const [byEquip,missed]=await Promise.all([
+      api("/api/kpis/by/equipment",params+"&plant="+encodeURIComponent(plant)).catch(()=>[]),
+      api("/api/wos/missed",params+"&limit=400")]);
+    const own=missed.items.filter(w=>w.plant===plant);
+    const row=plantRows.find(p=>p.key===plant)||{};
+    document.getElementById("mbody").innerHTML = statBlock(row)
+      + `<div class="mt">WOs abiertas por O&M sin detección previa (${own.length})</div>`
+      + missedTable(own);
+  }catch(err){
+    document.getElementById("mbody").innerHTML=`<div class="err">${esc(err.message)}</div>`;
+  }
+}
+
+async function openWeek(period){
+  showModal("Semana del "+fd(period.period), ctxLabel(), '<div class="loading">cargando…</div>');
+  try{
+    const missed=await api("/api/wos/missed",qs({limit:600}));
+    const items=missed.items.filter(w=>{
+      const d=new Date(w.date+"T00:00:00Z");
+      const off=(d.getUTCDay()+6)%7; d.setUTCDate(d.getUTCDate()-off);
+      return d.toISOString().slice(0,10)===period.period;
+    });
+    document.getElementById("mbody").innerHTML = statBlock(period)
+      + `<div class="mt">WOs no detectadas esa semana (${items.length})</div>` + missedTable(items);
+  }catch(err){
+    document.getElementById("mbody").innerHTML=`<div class="err">${esc(err.message)}</div>`;
+  }
+}
+
+async function openDim(dimension,row){
+  showModal(row.key, ctxLabel(), '<div class="loading">cargando…</div>');
+  try{
+    const missed=await api("/api/wos/missed",qs({limit:600}));
+    const items=missed.items.filter(w=>w[dimension==="equipment"?"equipment":dimension]===row.key);
+    document.getElementById("mbody").innerHTML = statBlock(row)
+      + `<div class="mt">WOs no detectadas (${items.length})</div>` + missedTable(items);
+  }catch(err){
+    document.getElementById("mbody").innerHTML=`<div class="err">${esc(err.message)}</div>`;
+  }
+}
+
+/* ═══ Vista de administración ═══ */
+async function renderAdmin(){
+  try{
+    const [changes,files]=await Promise.all([
+      api("/api/audit/attribution-changes",  "limit=100"),
+      api("/api/audit/source-files")]);
+    document.getElementById("acTotal").textContent=changes.total+" en total";
+    document.getElementById("acBox").innerHTML = changes.items.length ? `
+      <div class="scroll"><table><thead><tr><th>Planta</th><th>Inicio</th><th>Equipo</th>
+      <th>Antes</th><th>Ahora</th></tr></thead><tbody>
+      ${changes.items.map(c=>`<tr style="cursor:default"><td><b>${esc(c.plant)}</b></td>
+        <td style="color:var(--mut)">${esc(c.start_ts.replace("T"," ").slice(0,16))}</td>
+        <td><span class="tag">${esc(c.equipment)}</span></td>
+        <td style="color:var(--bad)">${esc(c.from)}</td>
+        <td style="color:var(--ok)">${esc(c.to)}</td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">Ninguna reatribución detectada todavía</div>`;
+    document.getElementById("filesBox").innerHTML = `
+      <table><thead><tr><th>Fichero</th><th>Cargado</th><th class="num">Filas</th>
+      <th class="num">Reatrib.</th><th>Periodo</th></tr></thead><tbody>
+      ${files.map(f=>`<tr style="cursor:default"><td><b>${esc(f.filename)}</b></td>
+        <td style="color:var(--mut)">${esc((f.loaded_at||"").replace("T"," ").slice(0,16))}</td>
+        <td class="num">${f.rows_inserted}/${f.rows_total}</td>
+        <td class="num">${f.attribution_changes||"—"}</td>
+        <td style="color:var(--mut)">${esc(f.period_start||"")} → ${esc(f.period_end||"")}</td>
+      </tr>`).join("")}</tbody></table>`;
+  }catch(err){ showError(err.message); }
+}
+
+/* ═══ Orquestación ═══ */
+async function loadMeta(){
+  META=await api("/api/meta");
+  return META;
+}
+
+let inFlight=0;
+async function render(){
+  const isAdmin=S.view==="admin";
+  document.getElementById("mainView").style.display=isAdmin?"none":"";
+  document.getElementById("adminView").style.display=isAdmin?"":"none";
+  document.getElementById("title").textContent =
+    (isAdmin?"Cargas y auditoría — ":"Detection Rate — ") +
+    (S.contractor || S.portfolio || S.country || "Todos los países");
+
+  const token=++inFlight;
+  try{
+    const params=qs();
+    const [sum,byCountry] = await Promise.all([
+      api("/api/kpis/summary",params), api("/api/kpis/by/country",params)]);
+    if(token!==inFlight) return;        // llegó una respuesta más nueva: descartar
+    renderNav(byCountry);
+    document.getElementById("sfoot").innerHTML =
+      `${sum.wos} WOs en scope<br>${sum.plants} plantas<br>${ml(S.from)} – ${ml(S.to)}`;
+    document.getElementById("subtitle").textContent =
+      `${ml(S.from)} – ${ml(S.to)} · ${sum.wos} WOs en scope · ` +
+      (S.type==="P"?"solo Production Loss":S.type==="C"?"solo Communication Loss":"Production + Communication") +
+      (S.status?" · "+(S.status==="open"?"solo abiertas":"solo cerradas"):"");
+
+    if(isAdmin){ await renderAdmin(); return; }
+
+    const [series,monthly,byEquip,byDim,byPlant,excluded] = await Promise.all([
+      api("/api/kpis/timeseries",params+"&granularity=week"),
+      api("/api/kpis/timeseries",params+"&granularity=month"),
+      api("/api/kpis/by/equipment",params),
+      api("/api/kpis/by/"+S.dim,params),
+      api("/api/kpis/by/plant",params),
+      api("/api/scope/excluded",params)]);
+    if(token!==inFlight) return;
+
+    renderKpis(sum,monthly);
+    renderTrend(series);
+    renderEquip(byEquip);
+    renderDim(byDim);
+    plantRows=byPlant; renderTable();
+    renderExcluded(excluded);
+  }catch(err){ showError(err.message); }
+}
+
+(async function start(){
+  try{
+    await loadMeta();
+    if(!META.months.length){
+      showError("la base de datos está vacía: carga un export desde «Cargas y auditoría»");
+      META.months=[new Date().toISOString().slice(0,7)];
+    }
+    initControls();
+    await render();
+  }catch(err){ showError(err.message); }
+})();
+</script>
+</body>
+</html>

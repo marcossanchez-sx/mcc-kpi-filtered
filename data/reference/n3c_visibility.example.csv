@@ -1,0 +1,3 @@
+plant,asset_id,country,sst,poi,ppc,wst,pst,inv_pct,onboarding_status
+Planta Ejemplo 1,SX00000001,Italy,FULL,OK,OK,OK,OK,100,Completed
+Planta Ejemplo 2,SX00000002,Spain,NA,OK,NA,OK,NA,0,Completed w/punchlist

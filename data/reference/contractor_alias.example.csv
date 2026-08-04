@@ -1,0 +1,6 @@
+pattern,canonical
+^res\b,RES
+^stern energy,Stern Energy
+^belectric,Belectric
+^omega operations,Omega Operations
+^(sonnedix france operations|sfo)\b,Sonnedix France Operations
