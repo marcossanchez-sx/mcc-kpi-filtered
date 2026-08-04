@@ -31,6 +31,28 @@ ingesta los CSV que haya en `data/incoming/`.
 - API navegable: http://localhost:8010/docs
 - Estado: http://localhost:8010/api/health
 
+### `password authentication failed for user "mcc"`
+
+Postgres fija la contraseña **sólo la primera vez** que inicializa su directorio de
+datos. Si el contenedor arrancó antes de existir `.env`, el volumen quedó con la
+contraseña por defecto y no coincide con la nueva.
+
+Si aún no hay datos que conservar, se recrea el volumen:
+
+```bash
+docker compose down -v
+docker compose up -d
+docker compose exec api python cli.py bootstrap
+```
+
+Si ya hay datos cargados y no quieres perderlos, cambia la contraseña dentro de
+Postgres en lugar de borrar el volumen:
+
+```bash
+docker compose exec db psql -U mcc -d mcc -c "ALTER USER mcc WITH PASSWORD 'la-de-tu-.env';"
+docker compose restart api
+```
+
 ### Si el puerto está ocupado
 
 ```cmd
