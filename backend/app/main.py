@@ -231,6 +231,19 @@ def response_times(
     return payload
 
 
+@app.get("/api/audit/reclassified", tags=["audit"])
+def audit_reclassified(
+    filters: q.Filters = Depends(filters_from_query),
+    session: Session = Depends(get_session),
+    limit: int = Query(500, ge=1, le=5000),
+) -> dict:
+    """
+    Detecciones del MCC con la causa cambiada por el contratista a algo que no es
+    Failure. Cuentan en el rate; van marcadas para no leerlas como trabajo planificado.
+    """
+    return q.reclassified_wos(session, filters, limit=limit)
+
+
 @app.get("/api/audit/vanished", tags=["audit"])
 def audit_vanished(
     filters: q.Filters = Depends(filters_from_query),

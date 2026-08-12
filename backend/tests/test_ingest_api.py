@@ -960,3 +960,92 @@ class TestPersistenciaHistorica:
         assert data["total"] == 1
         assert data["items"][0]["description"] == "incidencia B"
         assert data["items"][0]["last_seen"] is not None
+
+
+class TestReclasificacionDeCausa:
+    """
+    El contratista cambia la causa de una WO que abrió el MCC.
+
+    La detección es válida y la WO cuenta —el MCC vio la incidencia—, pero se marca:
+    sin la nota, una WO del MCC con causa 'Preventive Maintenance' se lee como si el
+    MCC hubiera abierto un mantenimiento, que no es lo que pasó. Caso real: Douro
+    PST1 INV10, Failure -> EPC Commissioning.
+    """
+
+    def _mcc_reclasificada(self, session):
+        ingest_csv(
+            session,
+            content=csv_bytes(row(user="MCC", cause="Failure", description="inv 10 sin produccion")),
+            filename="foto-1.csv",
+        )
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", cause="EPC Commissioning", description="inv 10 sin produccion",
+                    created="1 jun 2026, 9:00")
+            ),
+            filename="foto-2.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+
+    def test_sigue_contando(self, session):
+        self._mcc_reclasificada(session)
+        wo = session.scalars(select(WoScoped)).one()
+        assert wo.in_scope is True
+        assert wo.is_mcc is True
+
+    def test_queda_marcada_con_la_causa_original(self, session):
+        self._mcc_reclasificada(session)
+        wo = session.scalars(select(WoScoped)).one()
+        assert wo.cause == "EPC Commissioning"
+        assert wo.cause_first == "Failure"
+        assert wo.cause_reclassified is True
+
+    def test_el_cambio_de_causa_queda_auditado(self, session):
+        self._mcc_reclasificada(session)
+        cambios = session.scalars(
+            select(AttributionChange).where(AttributionChange.field == "cause")
+        ).all()
+        assert len(cambios) == 1
+        assert (cambios[0].old_value, cambios[0].new_value) == ("Failure", "EPC Commissioning")
+
+    def test_una_wo_del_contratista_con_esa_causa_si_sale(self, session):
+        """La asimetría es el punto: al contratista la causa sí le aplica."""
+        ingest_csv(
+            session,
+            content=csv_bytes(row(user="O&M Contractor", cause="EPC Commissioning")),
+            filename="ext.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        assert session.scalars(select(WoScoped)).one().in_scope is False
+
+    def test_el_resumen_avisa(self, session):
+        self._mcc_reclasificada(session)
+        assert q.summary(session, q.Filters())["mcc_reclassified"] == 1
+
+    def test_distingue_las_que_tienen_traza_de_las_que_no(self, session):
+        self._mcc_reclasificada(session)
+        # Esta la conocemos ya con la causa nueva: no hemos visto el cambio.
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", cause="Other", description="otra", start="9 may 2026, 8:00")
+            ),
+            filename="foto-3.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        data = q.reclassified_wos(session, q.Filters())
+        assert data["total"] == 2
+        assert data["con_traza"] == 1
+        assert data["sin_traza"] == 1
+        assert {c["key"] for c in data["by_cause"]} == {"EPC Commissioning", "Other"}
+
+    def test_endpoint(self, client, session):
+        self._mcc_reclasificada(session)
+        data = client.get("/api/audit/reclassified").json()
+        assert data["total"] == 1
+        assert data["items"][0]["cause_first"] == "Failure"
+        assert "no deshace la detección" in data["note"]

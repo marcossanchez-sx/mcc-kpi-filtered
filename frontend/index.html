@@ -257,6 +257,7 @@ tbody tr:hover{background:#22252f}
 
     <section id="mainView">
       <div class="scopeBanner" id="scopeBanner" style="display:none"></div>
+      <div class="expl" id="reclNote" style="margin:0 0 14px"></div>
       <div class="kpis" id="kpis"></div>
       <div class="grid2">
         <div class="panel">
@@ -372,6 +373,13 @@ tbody tr:hover{background:#22252f}
         <div class="ph"><h2>Ficheros cargados</h2></div>
         <div class="psub">Cada export queda como snapshot inmutable</div>
         <div id="filesBox"></div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><h2>Detecciones del MCC con la causa cambiada</h2>
+          <span class="hint" id="reclTotal"></span></div>
+        <div class="psub">Las detect&oacute; el MCC; el contratista reclasific&oacute; la causa despu&eacute;s</div>
+        <div id="reclBox"></div>
       </div>
 
       <div class="panel">
@@ -1356,6 +1364,34 @@ async function openDim(dimension,row){
 /* WOs que dejaron de venir en el origen y se conservan a propósito. Si se
    descontaran, un fallo de ingesta o un borrado en eMaint movería un porcentaje ya
    publicado. Van aquí para revisarlas en eMaint, no para ajustar el número. */
+/* El MCC abre la WO al detectar la incidencia y el contratista le cambia la causa
+   después. La detección es válida y la WO cuenta; la nota está para que una WO del MCC
+   con causa 'Preventive Maintenance' no se lea como que el MCC abrió un mantenimiento. */
+function renderReclassified(r){
+  const box=document.getElementById("reclBox");
+  if(!box) return;
+  document.getElementById("reclTotal").textContent =
+    r.total ? `${r.total} de ${r.mcc_total} WOs del MCC (${r.share_mcc}%)` : "ninguna";
+  if(!r.total){ box.innerHTML='<div class="empty">Todas las detecciones del MCC mantienen su causa</div>'; return; }
+  box.innerHTML = `
+    <div class="expl" style="margin-top:0">${esc(r.note)}
+      <br><b>${r.con_traza}</b> con el cambio visto entre dos exports;
+      <b>${r.sin_traza}</b> ya las conocimos reclasificadas, así que el cambio se deduce
+      pero no se demuestra.
+      ${r.by_cause.map(c=>`<span class="chip">${esc(c.key)} ${c.wos}</span>`).join(" ")}</div>
+    <div class="scroll"><table><thead><tr><th>Fecha</th><th>Planta</th><th>Equipo</th>
+      <th>Causa</th><th>Descripci&oacute;n</th></tr></thead><tbody>
+      ${r.items.map(i=>`<tr style="cursor:default">
+        <td style="color:var(--mut)">${esc(i.date)}</td>
+        <td><b>${esc(i.plant)}</b></td><td><span class="tag">${esc(i.equipment)}</span></td>
+        <td>${i.reclassified
+              ? `<span style="color:var(--mut)">${esc(i.cause_first)}</span> &rarr; <b>${esc(i.cause)}</b>`
+              : `<b>${esc(i.cause)}</b> <span class="pill warn">sin traza</span>`}</td>
+        <td>${i.wo_url?`<a href="${esc(i.wo_url)}" target="_blank" rel="noopener">${esc(String(i.description||"").slice(0,42))} &nearr;</a>`
+                     :esc(String(i.description||"").slice(0,42))}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
 function renderVanished(v){
   const box=document.getElementById("vanBox");
   if(!box) return;
@@ -1380,11 +1416,13 @@ function renderVanished(v){
 
 async function renderAdmin(){
   try{
-    const [changes,files,van]=await Promise.all([
+    const [changes,files,van,recl]=await Promise.all([
       api("/api/audit/attribution-changes",  "limit=100"),
       api("/api/audit/source-files"),
-      api("/api/audit/vanished", qs()+"&limit=200")]);
+      api("/api/audit/vanished", qs()+"&limit=200"),
+      api("/api/audit/reclassified", qs()+"&limit=200")]);
     renderVanished(van);
+    renderReclassified(recl);
     document.getElementById("acTotal").textContent=changes.total+" en total";
     document.getElementById("acBox").innerHTML = changes.items.length ? `
       <div class="scroll"><table><thead><tr><th>Planta</th><th>Inicio</th><th>Equipo</th>
@@ -1464,6 +1502,11 @@ async function render(){
     renderExcluded(excluded);
     renderTimes(sum.times);
     renderScopeBanner(sum);
+    const nota=document.getElementById("reclNote");
+    if(nota) nota.innerHTML = sum.mcc_reclassified
+      ? `<span class="pill warn">${sum.mcc_reclassified}</span> detecciones del MCC llevan una causa
+         que el contratista cambió a algo distinto de Failure. Cuentan igual —la detección ocurrió—
+         pero no son trabajo que el MCC planificara. Detalle en «Cargas y auditoría».` : "";
 
     const byCtr = S.dim==="contractor" ? byDim : await api("/api/kpis/by/contractor",params);
     if(token!==inFlight) return;

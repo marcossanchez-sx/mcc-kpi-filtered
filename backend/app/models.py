@@ -260,6 +260,15 @@ class WoScoped(Base):
     # la causa, un "fuera por causa distinta de Failure" no dice qué era.
     cause: Mapped[str | None] = mapped_column(String(80), index=True)
 
+    # Causa tal como se vio la primera vez, y aviso si alguien la cambió después.
+    #
+    # Caso real: el MCC abre la WO al detectar la incidencia y más tarde el contratista
+    # reclasifica la causa (Failure -> Preventive Maintenance / Other / EPC
+    # Commissioning). La detección sigue siendo válida y la WO cuenta, pero el dato hay
+    # que presentarlo con la nota: si no, parece que el MCC abrió un mantenimiento.
+    cause_first: Mapped[str | None] = mapped_column(String(80))
+    cause_reclassified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
     # Trazabilidad de la permanencia. Una WO que apareció en un export y desaparece de
     # los siguientes NO se elimina: se conserva y se marca. Así un problema de ingesta
     # o un borrado en eMaint no puede reescribir un porcentaje ya publicado.

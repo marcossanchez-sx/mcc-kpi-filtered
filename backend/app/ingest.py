@@ -249,10 +249,15 @@ def ingest_csv(
 
     # Estado vigente antes de esta carga, para detectar reatribuciones.
     latest = _latest_observation_subquery()
-    previous: dict[str, tuple[str | None, int]] = {
-        row.natural_key: (row.cmms_user, row.source_file_id)
+    previous: dict[str, tuple[str | None, int, str | None]] = {
+        row.natural_key: (row.cmms_user, row.source_file_id, row.cause)
         for row in session.execute(
-            select(WoObservation.natural_key, WoObservation.cmms_user, WoObservation.source_file_id)
+            select(
+                WoObservation.natural_key,
+                WoObservation.cmms_user,
+                WoObservation.source_file_id,
+                WoObservation.cause,
+            )
             .join(
                 latest,
                 (WoObservation.natural_key == latest.c.nk)
@@ -334,21 +339,31 @@ def ingest_csv(
         max_day = day if max_day is None or day > max_day else max_day
 
         prior = previous.get(key)
-        if prior is not None and prior[0] != cmms_user:
-            session.add(
-                AttributionChange(
-                    natural_key=key,
-                    plant_raw=plant_raw,
-                    start_ts=start_ts,
-                    equipment=equipment or None,
-                    field="cmms_user",
-                    old_value=prior[0],
-                    new_value=cmms_user,
-                    from_file_id=prior[1],
-                    to_file_id=source.id,
+        if prior is not None:
+            cause_value = (value(row, "cause") or "").strip() or None
+            # Se auditan los dos campos que reescriben el pasado: quién la abrió y por
+            # qué. El segundo puede sacar una WO del scope retroactivamente, así que
+            # dejarlo sin traza haría imposible explicar por qué cambió una cifra.
+            for field_name, old, new in (
+                ("cmms_user", prior[0], cmms_user),
+                ("cause", prior[2], cause_value),
+            ):
+                if (old or "") == (new or ""):
+                    continue
+                session.add(
+                    AttributionChange(
+                        natural_key=key,
+                        plant_raw=plant_raw,
+                        start_ts=start_ts,
+                        equipment=equipment or None,
+                        field=field_name,
+                        old_value=old,
+                        new_value=new,
+                        from_file_id=prior[1],
+                        to_file_id=source.id,
+                    )
                 )
-            )
-            changes += 1
+                changes += 1
 
     source.rows_total = total
     source.rows_inserted = inserted
@@ -416,6 +431,16 @@ def rebuild_scope(session: Session) -> dict:
     # esta comprobación salían 2956 "desaparecidas" de las que 2680 eran simplemente
     # no-Failure ausentes de un export filtrado. Una foto sólo es testigo de la
     # ausencia de una WO si contiene al menos una fila con esa misma causa.
+    # Primera causa observada de cada incidencia, en orden de foto. Sirve para avisar
+    # de las reclasificaciones posteriores.
+    first_cause: dict[str, str | None] = {}
+    for nk, cause in session.execute(
+        select(WoObservation.natural_key, WoObservation.cause)
+        .join(SourceFile, SourceFile.id == WoObservation.source_file_id)
+        .order_by(SourceFile.as_of.asc().nullsfirst(), WoObservation.source_file_id.asc())
+    ):
+        first_cause.setdefault(nk, cause)
+
     causes_by_file: dict[int, set[str | None]] = {}
     for file_id, cause in session.execute(
         select(WoObservation.source_file_id, WoObservation.cause).distinct()
@@ -513,6 +538,10 @@ def rebuild_scope(session: Session) -> dict:
                 revenue_loss=obs.revenue_loss,
                 detection_hours=sc.detection_hours(obs.start_ts, obs.wo_created_ts),
                 cause=obs.cause,
+                cause_first=first_cause.get(obs.natural_key, obs.cause),
+                cause_reclassified=(
+                    first_cause.get(obs.natural_key, obs.cause) or ""
+                ) != (obs.cause or ""),
                 act_hrs=obs.act_hrs,
                 resolution_hrs=obs.resolution_hrs,
                 completion_hrs=obs.completion_hrs,

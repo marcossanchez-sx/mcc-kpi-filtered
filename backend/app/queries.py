@@ -17,7 +17,7 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass, field
 
-from sqlalchemy import Select, and_, select, true
+from sqlalchemy import Select, and_, func, select, true
 from sqlalchemy.orm import Session
 
 from .models import WoScoped
@@ -207,6 +207,12 @@ def summary(session: Session, filters: Filters) -> dict:
         plants.add(row.plant)
     result = metrics.as_dict()
     result["plants"] = len(plants)
+    # Aviso que viaja con la cifra: cuántas de las detecciones del MCC llevan una causa
+    # que el contratista cambió después.
+    result["mcc_reclassified"] = sum(
+        1 for row in session.scalars(base_query(filters))
+        if row.is_mcc and (row.cause or "") != "Failure"
+    )
     return result
 
 
@@ -400,6 +406,59 @@ def _top(rows: list[WoScoped], attribute: str, limit: int = 3) -> list[dict]:
         counts[value] = counts.get(value, 0) + 1
     ordered = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
     return [{"key": k, "wos": v} for k, v in ordered]
+
+
+def reclassified_wos(session: Session, filters: Filters, limit: int = 500) -> dict:
+    """
+    Detecciones del MCC cuya causa ya no es Failure.
+
+    El MCC abre la WO al detectar la incidencia y después el contratista reclasifica la
+    causa. La detección es válida y la WO cuenta —para eso están las reglas separadas—
+    pero sin la nota el dato se lee al revés: parece que el MCC abrió un mantenimiento.
+
+    Se distinguen dos situaciones, porque la evidencia no es la misma:
+      con_traza  -> hemos visto el cambio entre dos exports (Failure -> otra cosa)
+      sin_traza  -> ya la conocimos con la causa nueva; el cambio es anterior a
+                    nuestro primer export, así que se deduce, no se demuestra
+    """
+    rows = list(
+        session.scalars(
+            select(WoScoped)
+            .where(WoScoped.is_mcc.is_(True), WoScoped.cause != "Failure", *filters.clauses())
+            .order_by(WoScoped.start_date.desc())
+        )
+    )
+    con_traza = [r for r in rows if r.cause_reclassified]
+    total_mcc = session.scalar(
+        select(func.count())
+        .select_from(WoScoped)
+        .where(WoScoped.is_mcc.is_(True), *filters.clauses())
+    ) or 0
+    return {
+        "total": len(rows),
+        "con_traza": len(con_traza),
+        "sin_traza": len(rows) - len(con_traza),
+        "mcc_total": total_mcc,
+        "share_mcc": round(len(rows) / total_mcc * 100, 1) if total_mcc else 0.0,
+        "by_cause": [
+            {"key": k, "wos": v}
+            for k, v in sorted(_count(rows, "cause").items(), key=lambda kv: -kv[1])
+        ],
+        "note": (
+            "Son detecciones del MCC. Cuentan en el rate: la reclasificación posterior "
+            "de la causa no deshace la detección. Se marcan para que no se lean como "
+            "trabajo planificado abierto por el MCC."
+        ),
+        "items": [
+            {
+                "plant": r.plant, "country": r.country, "date": r.start_date.isoformat(),
+                "equipment": r.equipment, "cause": r.cause, "cause_first": r.cause_first,
+                "reclassified": r.cause_reclassified, "contractor": r.contractor,
+                "description": r.description, "wo_url": r.wo_url,
+            }
+            for r in rows[:limit]
+        ],
+    }
 
 
 def vanished_wos(session: Session, filters: Filters, limit: int = 500) -> dict:
