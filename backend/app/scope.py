@@ -360,3 +360,154 @@ def wo_guid(url: object) -> str | None:
     """
     match = WO_GUID_RE.search(str(url or ""))
     return match.group(1).lower() if match else None
+
+
+# ── Sospecha de causa mal clasificada en las WOs del contratista ──────────────────
+#
+# El sesgo va en el sentido incómodo: si una avería que encontró el contratista se
+# etiqueta como Corrective Maintenance, sale del denominador y el detection rate del
+# MCC **sube**. O sea que esta mala clasificación oculta fallos de detección nuestros.
+# Por eso se mide y se publica como banda de sensibilidad, no se esconde.
+#
+# Dos niveles, y la diferencia de solidez es deliberada:
+#
+#   "contradiccion"  el propio registro se contradice: trae un Failure Cause concreto
+#                    (AC BREAKER TRIP, IGBT OVERHEATING…) y a la vez una causa que no
+#                    es Failure. No es una opinión, es un dato incoherente.
+#   "rearme"         el texto dice que se rearmó, reseteó o reinició el equipo. No se
+#                    rearma lo que se paró de forma planificada.
+#   "texto"          la descripción habla de avería y no menciona trabajo planificado.
+#                    Es una heurística mía, con falsos positivos, y NUNCA mueve la
+#                    cifra publicada: sólo amplía la banda de sensibilidad.
+
+FAILURE_CAUSE_VACIO = frozenset(
+    {"", "n/a", "na", "none", "-", "nan", "sin dato", "no aplica"}
+)
+
+# Sin \b final a propósito: "THERMOGRAPHY" y "TERMOGRAFIAS" tienen que entrar por su
+# raíz. Con el límite de palabra se colaban como sospechosas paradas por termografía
+# anual, que son trabajo planificado legítimo.
+TRABAJO_PLANIFICADO = re.compile(
+    r"(preventiv|thermograph|termograf|cleaning|limpieza|megagem|semestral|semester|"
+    r"annual|anual|scheduled|programad|revision|revisi[oó]n|inspecc|inspection|"
+    r"manutenzione programmata|panel replacement|sustituci[oó]n de panel|"
+    r"revamping|repowering|commissioning)",
+    re.I,
+)
+
+# Rearmar, resetear o reiniciar un equipo es la firma de una avería: no se rearma algo
+# que se paró de forma planificada. Va aparte porque es la señal más específica del
+# grupo, y aparece sobre todo en el campo Action Taken de eMaint — que hoy NO viene en
+# el export de WOs. Pedir esa columna es la mejora de datos más rentable que queda.
+REARME = re.compile(
+    r"(rearm|re-?arm|resete|\breset\b|reinici|riavvi|red[eé]marr|restart|"
+    r"reactiv|vuelta a servicio|back in service|returned to service|"
+    r"alarm(a)? (cleared|borrada|reseteada)|borrado de alarma|puesta en marcha)",
+    re.I,
+)
+
+LENGUAJE_DE_AVERIA = re.compile(
+    r"(fault|failure|tripp?ed|\btrip\b|stopped|shutdown|\berror\b|alarm|"
+    r"without production|not in production|no production|underperform|low production|"
+    r"fallo|aver[ií]a|parada|parado|disparo|guasto|fermo|non in produzione|"
+    r"sin producci[oó]n|blocco|\bko\b)",
+    re.I,
+)
+
+
+# La mala clasificación de causa corta en los dos sentidos, y hay que medir los dos:
+#
+#   avería etiquetada como mantenimiento  -> sale del denominador -> SUBE nuestro rate
+#   mantenimiento etiquetado como Failure -> entra en el denominador -> BAJA nuestro rate
+#
+# Publicar sólo el primero sería quedarse con la mitad que nos incomoda y la otra que
+# nos favorece sin contar. La banda de sensibilidad va a dos lados.
+
+
+def failure_cause_informado(failure_cause: object) -> bool:
+    """True sólo si trae un motivo de fallo real. 'N/A' es relleno, no información."""
+    return str(failure_cause or "").strip().lower() not in FAILURE_CAUSE_VACIO
+
+
+def sospecha_de_averia(
+    *,
+    cause: object,
+    failure_cause: object,
+    description: object,
+    is_mcc: bool,
+    action_taken: object = None,
+) -> str | None:
+    """
+    Nivel de sospecha de que una WO del contratista sea en realidad una avería.
+
+    Sólo se evalúan las del contratista: son las únicas a las que la regla de causa les
+    quita sitio en el denominador.
+    """
+    if is_mcc or str(cause).strip() == "Failure":
+        return None
+    if failure_cause_informado(failure_cause):
+        return "contradiccion"
+    text = " ".join(str(x or "") for x in (description, action_taken))
+    if REARME.search(text) and not TRABAJO_PLANIFICADO.search(text):
+        # Rearmar es tan específico que sube de nivel: se rearma lo que ha fallado.
+        return "rearme"
+    if LENGUAJE_DE_AVERIA.search(text) and not TRABAJO_PLANIFICADO.search(text):
+        return "texto"
+    return None
+
+
+def sospecha_de_planificado(
+    *,
+    cause: object,
+    failure_cause: object,
+    description: object,
+    is_mcc: bool,
+    action_taken: object = None,
+) -> str | None:
+    """
+    Señal inversa: WO del contratista etiquetada como Failure que parece planificada.
+
+    Estas sí entran en el denominador, así que **bajan** el detection rate del MCC. Si
+    sólo se midiera la sospecha en el otro sentido, se estaría publicando el sesgo
+    incómodo y callando el que nos favorece.
+
+    Se exige que el texto diga trabajo planificado y que NO haya lenguaje de avería ni
+    un Failure Cause concreto: con cualquiera de los dos, la etiqueta Failure se
+    sostiene y no hay nada que sospechar.
+    """
+    if is_mcc or str(cause).strip() != "Failure":
+        return None
+    if failure_cause_informado(failure_cause):
+        return None
+    text = " ".join(str(x or "") for x in (description, action_taken))
+    if TRABAJO_PLANIFICADO.search(text) and not LENGUAJE_DE_AVERIA.search(text):
+        return "planificado"
+    return None
+
+
+def sin_evidencia_de_causa(
+    *,
+    cause: object,
+    failure_cause: object,
+    description: object,
+    is_mcc: bool,
+    action_taken: object = None,
+) -> str | None:
+    """
+    WO del contratista etiquetada como Failure sin nada que lo respalde ni lo contradiga.
+
+    Ni Failure Cause, ni lenguaje de avería, ni de trabajo planificado: el texto no dice
+    nada. **No se excluye ni se reclasifica** — la etiqueta del origen se respeta. Es
+    sólo una lista de revisión, para decidir a mano si aplica.
+
+    Se separa de "planificado" a propósito: allí hay indicio de que la etiqueta está
+    mal; aquí no hay indicio de nada, y no tener evidencia no es evidencia en contra.
+    """
+    if is_mcc or str(cause).strip() != "Failure":
+        return None
+    if failure_cause_informado(failure_cause):
+        return None  # su propio Failure Cause ya confirma la etiqueta
+    text = " ".join(str(x or "") for x in (description, action_taken))
+    if LENGUAJE_DE_AVERIA.search(text) or TRABAJO_PLANIFICADO.search(text):
+        return None
+    return "sin_evidencia"

@@ -311,3 +311,88 @@ class TestSemanaIso:
 
     def test_domingo_va_a_la_semana_anterior(self):
         assert sc.iso_week_start(dt.date(2026, 8, 2)) == dt.date(2026, 7, 27)
+
+
+class TestSospechaDeCausaMalClasificada:
+    """
+    La mala clasificación de causa corta en los dos sentidos y hay que medir los dos.
+
+    Avería etiquetada como mantenimiento -> sale del denominador -> SUBE nuestro rate.
+    Mantenimiento etiquetado como Failure -> entra -> BAJA nuestro rate.
+
+    Publicar sólo el primero sería quedarse el sesgo incómodo y callar el que favorece.
+    Ninguna de estas señales cambia la cifra: alimentan una banda de sensibilidad.
+    """
+
+    def averia(self, **kw):
+        args = dict(cause="Corrective Maintenance", failure_cause=None,
+                    description="", is_mcc=False)
+        args.update(kw)
+        return sc.sospecha_de_averia(**args)
+
+    def test_failure_cause_concreto_con_otra_causa_es_contradiccion(self):
+        # No existe un mantenimiento planificado cuyo motivo de fallo sea un disparo.
+        assert self.averia(failure_cause="AC BREAKER TRIP") == "contradiccion"
+
+    @pytest.mark.parametrize("valor", ["N/A", "NA", "", None, "none", "  "])
+    def test_na_es_relleno_y_no_evidencia(self, valor):
+        assert sc.failure_cause_informado(valor) is False
+        assert self.averia(failure_cause=valor) is None
+
+    def test_rearmar_es_la_senal_mas_especifica(self):
+        # No se rearma lo que se paró de forma planificada.
+        assert self.averia(description="Inverter 12 stopped",
+                           action_taken="Se rearma el inversor") == "rearme"
+
+    def test_lenguaje_de_averia_en_la_descripcion(self):
+        assert self.averia(description="Inverter 7.2.1 stopped.") == "texto"
+
+    def test_el_trabajo_planificado_no_es_sospechoso(self):
+        """
+        Caso que se me colaba: el \\b final impedía que 'THERMOGRAPHY' entrara por la
+        raíz 'thermograph', y una parada por termografía anual salía como sospechosa.
+        """
+        assert self.averia(
+            description="CT4 INVERTERS STOPPED DUE TO ANNUAL THERMOGRAPHY"
+        ) is None
+        assert self.averia(description="REALIZACION_TERMOGRAFIAS_PST02") is None
+
+    def test_no_se_evalua_al_mcc(self):
+        """Al MCC la causa no le quita sitio en el denominador: no aplica."""
+        assert self.averia(failure_cause="AC BREAKER TRIP", is_mcc=True) is None
+
+    def test_ni_las_que_ya_son_failure(self):
+        assert self.averia(cause="Failure", failure_cause="AC BREAKER TRIP") is None
+
+    def test_senal_inversa_failure_que_parece_planificado(self):
+        assert sc.sospecha_de_planificado(
+            cause="Failure", failure_cause="N/A",
+            description="REALIZACION_TERMOGRAFIAS_PST02", is_mcc=False,
+        ) == "planificado"
+
+    def test_la_inversa_cede_ante_cualquier_indicio_de_averia(self):
+        # Con lenguaje de avería o con Failure Cause, la etiqueta Failure se sostiene.
+        assert sc.sospecha_de_planificado(
+            cause="Failure", failure_cause="N/A",
+            description="CT4 stopped due to annual thermography", is_mcc=False,
+        ) is None
+        assert sc.sospecha_de_planificado(
+            cause="Failure", failure_cause="AC BREAKER TRIP",
+            description="thermography", is_mcc=False,
+        ) is None
+
+    def test_failure_sin_evidencia_se_marca_pero_no_se_toca(self):
+        """
+        Ni Failure Cause ni lenguaje de ningún tipo: se lista para revisar a mano.
+        No tener evidencia no es evidencia en contra, así que la etiqueta se respeta.
+        """
+        assert sc.sin_evidencia_de_causa(
+            cause="Failure", failure_cause=None,
+            description="Derating Inverter 2.1.5", is_mcc=False,
+        ) == "sin_evidencia"
+
+    def test_su_propio_failure_cause_ya_la_confirma(self):
+        assert sc.sin_evidencia_de_causa(
+            cause="Failure", failure_cause="INVERTER FAN FAILURE",
+            description="Replacement of fans STS 4", is_mcc=False,
+        ) is None

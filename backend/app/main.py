@@ -231,6 +231,20 @@ def response_times(
     return payload
 
 
+@app.get("/api/audit/suspected-failures", tags=["audit"])
+def audit_suspected_failures(
+    filters: q.Filters = Depends(filters_from_query),
+    session: Session = Depends(get_session),
+    limit: int = Query(500, ge=1, le=5000),
+) -> dict:
+    """
+    WOs del contratista excluidas por causa que probablemente sean averías, con la
+    banda de sensibilidad del detection rate. El sesgo va a favor del MCC, así que se
+    publica en vez de aprovecharlo.
+    """
+    return q.suspected_failures(session, filters, limit=limit)
+
+
 @app.get("/api/audit/reclassified", tags=["audit"])
 def audit_reclassified(
     filters: q.Filters = Depends(filters_from_query),

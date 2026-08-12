@@ -59,6 +59,7 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "capacity": ("Capacity Affected",),
     "revenue": ("Revenue Loss (€)", "Revenue Loss"),
     "lifecycle": ("Incident Lifecycle (hrs)",),
+    "action_taken": ("Action Taken", "Action taken", "c_actiontaken"),
     "detection_hrs": ("Detection (hrs)",),
     "act_hrs": ("Act (hrs)",),
     "resolution_hrs": ("Resolution (hrs)",),
@@ -320,6 +321,7 @@ def ingest_csv(
                 capacity_affected=_to_float(value(row, "capacity")),
                 revenue_loss=_to_float(value(row, "revenue")),
                 incident_lifecycle_hrs=_to_float(value(row, "lifecycle")),
+                action_taken=(value(row, "action_taken") or "").strip() or None,
                 detection_hrs_src=_to_float(value(row, "detection_hrs")),
                 act_hrs=_to_float(value(row, "act_hrs")),
                 resolution_hrs=_to_float(value(row, "resolution_hrs")),
@@ -687,6 +689,25 @@ def rebuild_scope(session: Session) -> dict:
                 detection_hours=sc.detection_hours(obs.start_ts, obs.wo_created_ts),
                 cause=obs.cause,
                 identity=obs.identity,
+                misclass_signal=sc.sospecha_de_averia(
+                    cause=obs.cause,
+                    failure_cause=obs.failure_cause,
+                    description=obs.description,
+                    is_mcc=obs.is_mcc,
+                    action_taken=obs.action_taken,
+                ) or sc.sospecha_de_planificado(
+                    cause=obs.cause,
+                    failure_cause=obs.failure_cause,
+                    description=obs.description,
+                    is_mcc=obs.is_mcc,
+                    action_taken=obs.action_taken,
+                ) or sc.sin_evidencia_de_causa(
+                    cause=obs.cause,
+                    failure_cause=obs.failure_cause,
+                    description=obs.description,
+                    is_mcc=obs.is_mcc,
+                    action_taken=obs.action_taken,
+                ),
                 cause_first=first_cause.get(obs.identity, obs.cause),
                 cause_reclassified=(
                     first_cause.get(obs.identity, obs.cause) or ""

@@ -209,6 +209,29 @@ def summary(session: Session, filters: Filters) -> dict:
     result["plants"] = len(plants)
     # Aviso que viaja con la cifra: cuántas de las detecciones del MCC llevan una causa
     # que el contratista cambió después.
+    # Banda de sensibilidad por la posible mala clasificación de causa en el
+    # contratista. Va en el resumen para que la cifra nunca viaje sola.
+    result["suspected_om_failures"] = session.scalar(
+        select(func.count())
+        .select_from(WoScoped)
+        .where(
+            WoScoped.in_scope.is_(False),
+            WoScoped.excluded_reason == "causa distinta de Failure",
+            WoScoped.misclass_signal.in_(("contradiccion", "rearme")),
+            *filters.clauses(with_scope=False),
+        )
+    ) or 0
+    result["suspected_om_planned"] = sum(
+        1 for row in session.scalars(base_query(filters))
+        if row.misclass_signal == "planificado"
+    )
+    # Las dos direcciones del sesgo, para que la cifra no viaje nunca sola.
+    result["rate_wo_si_contaran"] = _rate(
+        metrics.wo_mcc, metrics.wo_ext + result["suspected_om_failures"]
+    )
+    result["rate_wo_sin_planificado"] = _rate(
+        metrics.wo_mcc, max(metrics.wo_ext - result["suspected_om_planned"], 0)
+    )
     result["mcc_reclassified"] = sum(
         1 for row in session.scalars(base_query(filters))
         if row.is_mcc and (row.cause or "") != "Failure"
@@ -406,6 +429,108 @@ def _top(rows: list[WoScoped], attribute: str, limit: int = 3) -> list[dict]:
         counts[value] = counts.get(value, 0) + 1
     ordered = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
     return [{"key": k, "wos": v} for k, v in ordered]
+
+
+def suspected_failures(session: Session, filters: Filters, limit: int = 500) -> dict:
+    """
+    WOs del contratista excluidas por causa que probablemente sean averías.
+
+    Importa el sentido del sesgo: excluir una avería que encontró el contratista quita
+    un fallo de detección del denominador, así que **sube** el rate del MCC. Esta
+    función existe para que ese sesgo se publique en lugar de beneficiarnos en silencio.
+
+    Devuelve la banda de sensibilidad: qué pasaría con el rate si esas WOs contaran.
+    La cifra oficial no cambia —reclasificar es decisión del equipo, no del pipeline—
+    pero se presenta siempre con la banda al lado.
+    """
+    base = Filters(**{**filters.__dict__, "scope": "in"})
+    dentro = list(session.scalars(base_query(base)))
+    mcc = sum(1 for r in dentro if r.is_mcc)
+
+    conditions = filters.clauses(with_scope=False)
+    fuera = list(
+        session.scalars(
+            select(WoScoped).where(
+                WoScoped.in_scope.is_(False),
+                WoScoped.excluded_reason == "causa distinta de Failure",
+                WoScoped.is_mcc.is_(False),
+                *conditions,
+            )
+        )
+    )
+    contradiccion = [r for r in fuera if r.misclass_signal == "contradiccion"]
+    rearme = [r for r in fuera if r.misclass_signal == "rearme"]
+    texto = [r for r in fuera if r.misclass_signal == "texto"]
+
+    # Señal inversa: dentro del scope, WOs del contratista etiquetadas como Failure que
+    # parecen trabajo planificado. Estas hinchan el denominador y bajan nuestro rate.
+    planificado = [r for r in dentro if r.misclass_signal == "planificado"]
+    # Etiquetadas Failure sin nada que lo respalde ni lo contradiga. No se tocan: son
+    # lista de revisión. No tener evidencia no es evidencia en contra.
+    sin_evidencia = [r for r in dentro if r.misclass_signal == "sin_evidencia"]
+
+    def rate_con(entran: int = 0, salen: int = 0) -> float | None:
+        total = len(dentro) + entran - salen
+        return round(mcc / total * 100, 1) if total else None
+
+    return {
+        "excluded_by_cause": len(fuera),
+        "contradiccion": len(contradiccion),
+        "rearme": len(rearme),
+        "texto": len(texto),
+        "planificado": len(planificado),
+        "sin_evidencia": len(sin_evidencia),
+        "by_cause": [
+            {"key": k, "wos": v}
+            for k, v in sorted(_count(contradiccion, "cause").items(), key=lambda kv: -kv[1])
+        ],
+        "by_contractor": [
+            {"key": k, "wos": v}
+            for k, v in sorted(_count(contradiccion, "contractor").items(), key=lambda kv: -kv[1])
+        ][:10],
+        "by_failure_cause": [
+            {"key": k, "wos": v}
+            for k, v in sorted(_count(contradiccion, "failure_cause").items(), key=lambda kv: -kv[1])
+        ][:10],
+        # Banda a dos lados. El extremo bajo entra averías que hoy no cuentan; el alto
+        # saca trabajo planificado que hoy sí cuenta. La cifra oficial no se mueve: la
+        # reclasificación la decide el equipo, no el pipeline.
+        "sensitivity": {
+            "rate_actual": rate_con(),
+            "solo_contradiccion": rate_con(entran=len(contradiccion)),
+            "contradiccion_y_rearme": rate_con(entran=len(contradiccion) + len(rearme)),
+            "todas_las_senales": rate_con(
+                entran=len(contradiccion) + len(rearme) + len(texto),
+                salen=len(planificado),
+            ),
+            "extremo_alto_sin_planificado": rate_con(salen=len(planificado)),
+            "extremo_bajo_todas_no_failure": rate_con(entran=len(fuera)),
+        },
+        "note": (
+            "Excluir una avería que encontró el contratista quita un fallo de detección "
+            "del denominador y sube el rate del MCC. La banda muestra hasta dónde: el "
+            "nivel 'contradiccion' es dato incoherente del propio registro (Failure "
+            "Cause concreto con causa que no es Failure); 'texto' es heurística sobre la "
+            "descripción, con falsos positivos, y no debe usarse para mover la cifra. "
+            "La señal 'planificado' va en sentido contrario: WOs etiquetadas como "
+            "Failure que parecen trabajo programado, y que hoy nos bajan el rate. "
+            "'sin_evidencia' no mueve nada: son Failure sin Failure Cause y con un "
+            "texto que no dice nada, y se listan sólo para revisarlas a mano."
+        ),
+        "items": [
+            {
+                "plant": r.plant, "country": r.country, "date": r.start_date.isoformat(),
+                "equipment": r.equipment, "cause": r.cause, "failure_cause": r.failure_cause,
+                "contractor": r.contractor, "signal": r.misclass_signal,
+                "description": r.description, "wo_url": r.wo_url,
+            }
+            for r in sorted(
+                contradiccion + rearme + texto + planificado + sin_evidencia,
+                key=lambda r: r.start_date,
+                reverse=True,
+            )[:limit]
+        ],
+    }
 
 
 def reclassified_wos(session: Session, filters: Filters, limit: int = 500) -> dict:

@@ -108,6 +108,9 @@ class WoObservation(Base):
     # Detection y Total están casi al 100%, pero Resolution ronda el 2% y Act el 26%.
     # Se guardan igual y la API devuelve la cobertura de cada una, para que un 2% no
     # se lea como una mediana sólida.
+    # Action Taken de eMaint. Hoy el export de WOs no lo trae, pero es donde se ve si
+    # rearmaron el equipo, así que se deja listo el campo y el alias.
+    action_taken: Mapped[str | None] = mapped_column(Text)
     detection_hrs_src: Mapped[float | None] = mapped_column(Float)
     act_hrs: Mapped[float | None] = mapped_column(Float)
     resolution_hrs: Mapped[float | None] = mapped_column(Float)
@@ -289,6 +292,10 @@ class WoScoped(Base):
     # o un borrado en eMaint no puede reescribir un porcentaje ya publicado.
     #   vanished        -> ya no viene en el export más reciente que cubre su fecha
     #   last_seen_as_of -> fecha de la última foto que la contenía
+    # Sospecha de que una WO del contratista etiquetada como mantenimiento sea en
+    # realidad una avería: "contradiccion" (su Failure Cause la delata) o "texto"
+    # (heurística sobre la descripción). Alimenta la banda de sensibilidad.
+    misclass_signal: Mapped[str | None] = mapped_column(String(20), index=True)
     identity: Mapped[str | None] = mapped_column(String(220), index=True)
     vanished: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     last_seen_as_of: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
