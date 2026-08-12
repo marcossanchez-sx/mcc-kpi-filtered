@@ -231,20 +231,23 @@ class TestScopeSobreDatosReales:
         ingest_csv(
             session,
             content=csv_bytes(
-                row(plant="Ottobiano 1", equipment="Plant", start="1 jun 2026, 8:00"),
-                row(plant="Ottobiano 1", equipment="Inverter", start="1 jun 2026, 10:00"),
+                row(plant="Ottobiano 1", equipment="Plant", start="1 jun 2026, 8:00",
+                    user="O&M Contractor"),
+                row(plant="Ottobiano 1", equipment="Inverter", start="1 jun 2026, 10:00", user="O&M Contractor"),
             ),
             filename="vis.csv",
         )
         rebuild_scope(session)
         state = {r.equipment: r.in_scope for r in session.scalars(select(WoScoped))}
+        # Ottobiano 1 tiene SST=NA: el MCC no ve la planta, así que una WO del
+        # contratista sobre 'Plant' no entra. (Si la hubiera abierto el MCC, contaría.)
         assert state["Plant"] is False, "SST=NA -> el MCC no ve la planta"
         assert state["Inverter"] is True
 
     def test_inverter_al_cero_excluye(self, session):
         ingest_csv(
             session,
-            content=csv_bytes(row(plant="Albaida", country="Spain", contractor="RES Energy")),
+            content=csv_bytes(row(plant="Albaida", country="Spain", contractor="RES Energy", user="O&M Contractor")),
             filename="inv0.csv",
         )
         rebuild_scope(session)
@@ -256,7 +259,8 @@ class TestScopeSobreDatosReales:
         ingest_csv(
             session,
             content=csv_bytes(
-                row(plant="Albaida", country="Spain", equipment="Meter", cause="Curtailment")
+                row(plant="Albaida", country="Spain", equipment="Meter", cause="Curtailment",
+                    user="O&M Contractor")
             ),
             filename="cause.csv",
         )
@@ -271,7 +275,7 @@ class TestScopeSobreDatosReales:
         ingest_csv(
             session,
             content=csv_bytes(
-                row(cause="Corrective Maintenance", description="mantenimiento"),
+                row(user="O&M Contractor", cause="Corrective Maintenance", description="mantenimiento"),
                 row(cause="Failure", description="averia", start="2 may 2026, 8:00"),
             ),
             filename="it.csv",
@@ -288,8 +292,8 @@ class TestScopeSobreDatosReales:
         ingest_csv(
             session,
             content=csv_bytes(
-                row(plant="Castelnau", country="France", start="2 jul 2026, 8:00"),
-                row(plant="Castelnau", country="France", start="4 jul 2026, 8:00"),
+                row(plant="Castelnau", country="France", start="2 jul 2026, 8:00", user="O&M Contractor"),
+                row(plant="Castelnau", country="France", start="4 jul 2026, 8:00", user="O&M Contractor"),
             ),
             filename="cast.csv",
         )
@@ -324,7 +328,7 @@ class TestScopeSobreDatosReales:
         """
         ingest_csv(
             session,
-            content=csv_bytes(row(plant="Ottobiano 1", equipment="Plant")),
+            content=csv_bytes(row(plant="Ottobiano 1", equipment="Plant", user="O&M Contractor")),
             filename="v.csv",
         )
         rebuild_scope(session)
@@ -479,7 +483,8 @@ class TestAPI:
     def test_excluidas_explican_el_denominador(self, client):
         client.post(
             "/api/ingest/wo-export",
-            files={"file": ("x.csv", csv_bytes(row(equipment="Tracker")), "text/csv")},
+            files={"file": ("x.csv", csv_bytes(
+                row(equipment="Tracker", user="O&M Contractor")), "text/csv")},
         )
         excluded = client.get("/api/scope/excluded").json()
         assert any("telemetría" in item["reason"] for item in excluded)
@@ -671,10 +676,13 @@ class TestFiltroDeScope:
         ingest_csv(
             session,
             content=csv_bytes(
-                row(),                                              # entra
+                row(),                                              # entra (MCC)
                 row(user="O&M Contractor", start="2 may 2026, 8:00"),  # entra
-                row(cause="Preventive Maintenance", start="3 may 2026, 8:00"),  # fuera
-                row(equipment="Tracker", start="4 may 2026, 8:00"),             # fuera
+                # Fuera de scope: son del contratista y no cumplen detectabilidad.
+                # Si fueran del MCC contarían, porque el MCC las detectó.
+                row(user="O&M Contractor", cause="Preventive Maintenance",
+                    start="3 may 2026, 8:00"),
+                row(user="O&M Contractor", equipment="Tracker", start="4 may 2026, 8:00"),
             ),
             filename="mix.csv",
         )

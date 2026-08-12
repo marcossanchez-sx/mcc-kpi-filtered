@@ -469,6 +469,7 @@ def rebuild_scope(session: Session) -> dict:
             country=obs.country,
             incident_lifecycle_hrs=obs.incident_lifecycle_hrs,
             cause_failure_only=failure_only,
+            is_mcc=obs.is_mcc,
         )
 
         day = obs.start_ts.date()

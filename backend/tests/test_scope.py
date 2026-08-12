@@ -40,6 +40,9 @@ def evaluate(**overrides) -> str | None:
         cause="Failure",
         country="Italy",
         incident_lifecycle_hrs=5.0,
+        # Por defecto se evalúa una WO del contratista: es la única a la que se le
+        # aplican las reglas de detectabilidad. Los tests que van del MCC lo dicen.
+        is_mcc=False,
     )
     args.update(overrides)
     return sc.evaluate(**args)
@@ -190,6 +193,53 @@ class TestReglasDeScope:
         onboardada da igual el equipo.
         """
         assert evaluate(plant=None, equipment="Tracker") == sc.R_PLANT_UNKNOWN
+
+
+class TestLasDeteccionesDelMccNoSeDescartan:
+    """
+    Una WO abierta por el MCC no sale del cálculo por una regla de detectabilidad.
+
+    Las reglas de onboarding, visibilidad, telemetría y causa existen para no penalizar
+    al MCC por lo que no podía ver. Aplicárselas a una detección que el MCC sí hizo
+    sería negar un hecho: la detectó. Sólo las reglas de universo —país, planta, fecha
+    legible— siguen valiendo para todos.
+    """
+
+    @pytest.mark.parametrize(
+        "caso",
+        [
+            {"plant": None},                                   # planta desconocida -> universo
+            {"start_ts": None},                                # sin fecha -> universo
+            {"country": "Japan"},                              # país fuera -> universo
+        ],
+    )
+    def test_las_reglas_de_universo_siguen_aplicando(self, caso):
+        assert evaluate(is_mcc=True, **caso) is not None
+
+    @pytest.mark.parametrize(
+        "caso",
+        [
+            {"start_ts": dt.datetime(2025, 12, 31, 12, 0)},    # antes del onboarding
+            {"plant": plant(completed_since=None)},            # sin fecha de onboarding
+            {"equipment": "Tracker"},                          # equipo sin telemetría
+            {"equipment": "Cosa Rara"},                        # equipo no catalogado
+            {"incident_type": "Preventive Maintenance"},       # tipo fuera
+            {"cause": "Corrective Maintenance"},               # causa distinta de Failure
+            {"plant": plant(vis_inv_pct=0)},                   # sin visibilidad SCADA
+            {"incident_lifecycle_hrs": 0},                     # ciclo de vida cero
+        ],
+    )
+    def test_la_detectabilidad_no_descarta_al_mcc(self, caso):
+        # La misma incidencia, abierta por el contratista, sí queda fuera.
+        assert evaluate(is_mcc=False, **caso) is not None
+        assert evaluate(is_mcc=True, **caso) is None
+
+    def test_planta_excluida_tampoco_descarta_al_mcc(self):
+        """Castelnau pierde SCADA, pero si el MCC abrió la WO es que la detectó."""
+        p = plant(excluded_from=dt.date(2026, 7, 3), excluded_reason="sin SCADA")
+        fecha = dt.datetime(2026, 7, 4, 9, 0)
+        assert evaluate(plant=p, start_ts=fecha, is_mcc=False) == sc.R_PLANT_EXCLUDED
+        assert evaluate(plant=p, start_ts=fecha, is_mcc=True) is None
 
 
 class TestContratistas:

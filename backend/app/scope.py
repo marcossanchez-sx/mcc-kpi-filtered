@@ -232,27 +232,50 @@ def evaluate(
     country: object,
     incident_lifecycle_hrs: object = None,
     cause_failure_only: frozenset[str] | set[str] | None = None,
+    is_mcc: bool = False,
 ) -> str | None:
     """
     Devuelve None si la incidencia entra en el cálculo, o el motivo de exclusión.
 
     Se devuelve el motivo en vez de un booleano para poder auditar cualquier cifra:
     "¿por qué no cuentan estas 13 WOs?" tiene respuesta sin volver al CSV.
+
+    Las reglas están en dos familias, y la diferencia es deliberada:
+
+    **Reglas de universo** — se aplican a todos. Definen qué entra en el KPI: país
+    dentro de la operación del MCC, fecha de inicio legible, planta identificable.
+
+    **Reglas de detectabilidad** — se aplican SÓLO a las WOs del contratista:
+    onboarding N3C, visibilidad SCADA, equipo con telemetría, causa, tipo de
+    incidencia, ciclo de vida. Existen para no penalizar al MCC por lo que no podía
+    ver, así que no tienen ningún sentido aplicadas a una detección que el MCC **sí**
+    hizo. Excluir una WO del MCC porque "la planta no está onboardada" sería negar una
+    detección que ocurrió de verdad.
+
+    Consecuencia a tener presente: el ratio deja de ser simétrico. No es "cuota sobre
+    un universo comparable", es "detecciones del MCC frente a incidencias que abrió el
+    contratista y que el MCC podría haber cazado". Es la definición correcta del KPI,
+    pero hay que etiquetarla así para que nadie la lea como una proporción simple.
     """
     if start_ts is None:
         return R_NO_START
-
-    try:
-        if incident_lifecycle_hrs is not None and float(incident_lifecycle_hrs) == 0:
-            return R_NO_LIFECYCLE
-    except (TypeError, ValueError):
-        pass
 
     if str(country).strip() in COUNTRIES_OUT:
         return R_COUNTRY_OUT
 
     if plant is None:
         return R_PLANT_UNKNOWN
+
+    # Desde aquí, todo son reglas de detectabilidad: una detección del MCC no se
+    # descarta por ellas.
+    if is_mcc:
+        return None
+
+    try:
+        if incident_lifecycle_hrs is not None and float(incident_lifecycle_hrs) == 0:
+            return R_NO_LIFECYCLE
+    except (TypeError, ValueError):
+        pass
 
     # Estar en la matriz de visibilidad no basta: el scope exige onboarding N3C
     # completado. Sin fecha de alta no sabemos desde cuándo el MCC veía la planta,
