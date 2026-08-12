@@ -48,15 +48,23 @@ EQUIPMENT_OUT = {
 
 INCIDENT_TYPES = {"Production Loss": "P", "Communication Loss": "C"}
 
-# Países donde sólo cuentan las incidencias por fallo. Las causas externas
-# (curtailment, red, meteorología) y el trabajo planificado (mantenimiento
-# correctivo/preventivo, revamping) no son incidencias que el MCC pueda detectar.
+# Sólo cuentan las incidencias con Cause = Failure, en todos los países.
 #
-# Es el valor por defecto: la lista real vive en la tabla `scope_rule`, así que se
-# puede ampliar o reducir sin tocar código y recalcular el histórico con
-# `rebuild_scope()`. Ver `cause_failure_only` en /api/scope/rules.
-CAUSE_FAILURE_ONLY_DEFAULT = frozenset({"Spain", "Portugal", "Chile"})
+# El resto no son incidencias que el MCC pueda detectar: el mantenimiento correctivo y
+# preventivo y el revamping son trabajo planificado, y las causas externas (curtailment,
+# red, meteorología) no son averías. Contarlas metería en el denominador órdenes que no
+# aplican al MCC.
+#
+# `*` significa "todos los países". La lista vive en la tabla `scope_rule`, así que se
+# puede restringir a países concretos sin tocar código, recalculando con `rebuild_scope()`.
+ALL_COUNTRIES = "*"
+CAUSE_FAILURE_ONLY_DEFAULT = frozenset({ALL_COUNTRIES})
 CAUSE_FAILURE_ONLY = CAUSE_FAILURE_ONLY_DEFAULT
+
+
+def cause_filter_applies(country: str, failure_only: frozenset[str] | set[str]) -> bool:
+    """La regla aplica si está el comodín o el país concreto."""
+    return ALL_COUNTRIES in failure_only or country in failure_only
 
 # Japón es shadowing, no operación del MCC.
 COUNTRIES_OUT = {"Japan"}
@@ -269,7 +277,7 @@ def evaluate(
 
     effective_country = plant.country or str(country).strip()
     failure_only = CAUSE_FAILURE_ONLY if cause_failure_only is None else cause_failure_only
-    if effective_country in failure_only and str(cause).strip() != "Failure":
+    if cause_filter_applies(effective_country, failure_only) and str(cause).strip() != "Failure":
         return R_CAUSE
 
     if plant.visible_for(equipment) is False:

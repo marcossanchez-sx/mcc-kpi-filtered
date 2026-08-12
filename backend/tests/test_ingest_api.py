@@ -27,7 +27,8 @@ COLUMNS = [
     "Country", "Asset", "Om Contract", "Start Ts Local", "WO Created Ts Local",
     "Ongoing", "CMMS User", "Equipment", "Incident Type", "Cause",
     "Capacity Affected", "Revenue Loss", "Incident Lifecycle (hrs)",
-    "Description English",
+    "Description English", "Detection (hrs)", "Act (hrs)", "Resolution (hrs)",
+    "Completion (hrs)", "Validation (hrs)", "Total time (hrs)",
 ]
 
 
@@ -47,10 +48,17 @@ def row(
     revenue: str = "100",
     lifecycle: str = "5",
     description: str = "x",
+    detection_hrs: str = "1",
+    act_hrs: str = "",
+    resolution_hrs: str = "",
+    completion_hrs: str = "",
+    validation_hrs: str = "",
+    total_hrs: str = "10",
 ) -> list[str]:
     return [
         country, plant, contractor, start, created, ongoing, user,
         equipment, incident_type, cause, capacity, revenue, lifecycle, description,
+        detection_hrs, act_hrs, resolution_hrs, completion_hrs, validation_hrs, total_hrs,
     ]
 
 
@@ -255,10 +263,23 @@ class TestScopeSobreDatosReales:
         rebuild_scope(session)
         assert session.scalars(select(WoScoped)).one().in_scope is False
 
-    def test_cause_no_failure_si_cuenta_en_italia(self, session):
-        ingest_csv(session, content=csv_bytes(row(cause="Curtailment")), filename="it.csv")
+    def test_cause_no_failure_tampoco_cuenta_en_italia(self, session):
+        """
+        La regla es global: sólo averías, en cualquier país. El mantenimiento y el
+        revamping son trabajo planificado y no son órdenes que apliquen al MCC.
+        """
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(cause="Corrective Maintenance", description="mantenimiento"),
+                row(cause="Failure", description="averia", start="2 may 2026, 8:00"),
+            ),
+            filename="it.csv",
+        )
         rebuild_scope(session)
-        assert session.scalars(select(WoScoped)).one().in_scope is True
+        state = {r.description: r.in_scope for r in session.scalars(select(WoScoped))}
+        assert state["mantenimiento"] is False
+        assert state["averia"] is True
 
     def test_exclusion_de_planta_por_fecha(self, session):
         reference.apply_plant_exclusion(
@@ -636,3 +657,151 @@ class TestAliasDeColumnas:
         assert missed["total"] == 1
         assert missed["items"][0]["wo_url"].startswith("https://")
         assert missed["items"][0]["failure_cause"] == "PROTECTION TRIP – CAUSE UNKNOWN"
+
+
+class TestFiltroDeScope:
+    """
+    El scope se puede invertir para ver qué se descarta y por qué.
+
+    Los descartes ya están persistidos con su motivo, así que enseñar la diferencia
+    entre lo que aplica y lo que no es un filtro, no una recarga.
+    """
+
+    def _cargar(self, session):
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(),                                              # entra
+                row(user="O&M Contractor", start="2 may 2026, 8:00"),  # entra
+                row(cause="Preventive Maintenance", start="3 may 2026, 8:00"),  # fuera
+                row(equipment="Tracker", start="4 may 2026, 8:00"),             # fuera
+            ),
+            filename="mix.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+
+    def test_in_es_el_valor_por_defecto(self, session):
+        self._cargar(session)
+        assert q.Filters().scope == "in"
+        assert q.summary(session, q.Filters())["wos"] == 2
+
+    def test_out_devuelve_lo_descartado(self, session):
+        self._cargar(session)
+        assert q.summary(session, q.Filters(scope="out"))["wos"] == 2
+
+    def test_all_es_la_suma(self, session):
+        self._cargar(session)
+        dentro = q.summary(session, q.Filters(scope="in"))["wos"]
+        fuera = q.summary(session, q.Filters(scope="out"))["wos"]
+        assert q.summary(session, q.Filters(scope="all"))["wos"] == dentro + fuera
+
+    def test_scope_invalido_falla_pronto(self, session):
+        with pytest.raises(ValueError):
+            q.Filters(scope="lo-que-sea").clauses()
+
+    def test_comparacion_trae_los_tres_bloques_y_los_motivos(self, session):
+        self._cargar(session)
+        data = q.scope_comparison(session, q.Filters())
+        assert data["in_scope"]["wos"] == 2
+        assert data["out_of_scope"]["wos"] == 2
+        assert data["share_in_scope"] == 50.0
+        motivos = {r["reason"] for r in data["reasons"]}
+        assert motivos == {sc_reason for sc_reason in motivos if sc_reason}
+        assert len(data["reasons"]) == 2
+        # El aviso de que el rate del bloque descartado no mide desempeño va en la
+        # respuesta, no sólo en la documentación: viaja con el dato.
+        assert "no mide desempeño" in data["note"]
+
+    def test_los_motivos_llevan_causa_y_equipo(self, session):
+        self._cargar(session)
+        por_motivo = {r["reason"]: r for r in q.excluded_breakdown(session, q.Filters())}
+        mantenimiento = next(r for k, r in por_motivo.items() if "causa" in k.lower())
+        assert mantenimiento["top_causes"][0]["key"] == "Preventive Maintenance"
+
+    def test_los_filtros_se_aplican_a_los_dos_lados(self, session):
+        self._cargar(session)
+        vacio = q.Filters(country="Spain")
+        assert q.summary(session, vacio)["wos"] == 0
+        assert q.summary(session, q.Filters(country="Spain", scope="out"))["wos"] == 0
+
+    def test_endpoint_expone_el_parametro(self, client, session):
+        self._cargar(session)
+        assert client.get("/api/kpis/summary").json()["wos"] == 2
+        assert client.get("/api/kpis/summary?scope=out").json()["wos"] == 2
+        assert client.get("/api/kpis/summary?scope=all").json()["wos"] == 4
+        assert client.get("/api/kpis/summary?scope=nope").status_code == 422
+        assert client.get("/api/scope/comparison").json()["share_in_scope"] == 50.0
+
+
+class TestCadenaDeTiempos:
+    """Los tiempos del export se guardan enteros, con su cobertura al lado."""
+
+    def test_se_persisten_todos_los_tramos(self, session):
+        ingest_csv(
+            session,
+            content=csv_bytes(row(act_hrs="2", resolution_hrs="8", total_hrs="20")),
+            filename="t.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        scoped = session.scalars(select(WoScoped).where(WoScoped.in_scope.is_(True))).one()
+        assert (scoped.act_hrs, scoped.resolution_hrs, scoped.total_time_hrs) == (2.0, 8.0, 20.0)
+
+    def test_la_cobertura_distingue_un_tramo_fiable_de_uno_anecdotico(self, session):
+        # Total informado en las tres; Resolución sólo en una.
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(total_hrs="10", resolution_hrs="5"),
+                row(total_hrs="20", start="2 may 2026, 8:00"),
+                row(total_hrs="30", start="3 may 2026, 8:00"),
+            ),
+            filename="cov.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        times = q.summary(session, q.Filters())["times"]
+        assert times["total_time_hrs"]["coverage"] == 100.0
+        assert times["total_time_hrs"]["median_all"] == 20.0
+        assert times["resolution_hrs"]["coverage"] == pytest.approx(33.3, abs=0.1)
+        assert times["resolution_hrs"]["n"] == 1
+
+    def test_tramo_sin_ningun_dato_no_inventa_mediana(self, session):
+        ingest_csv(session, content=csv_bytes(row(validation_hrs="")), filename="v.csv")
+        rebuild_scope(session)
+        session.commit()
+        validacion = q.summary(session, q.Filters())["times"]["validation_hrs"]
+        assert validacion["median_all"] is None
+        assert validacion["coverage"] == 0.0
+
+    def test_separa_mcc_de_contratista(self, session):
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", total_hrs="4"),
+                row(user="O&M Contractor", total_hrs="40", start="2 may 2026, 8:00"),
+            ),
+            filename="actor.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        total = q.summary(session, q.Filters())["times"]["total_time_hrs"]
+        assert total["median_mcc"] == 4.0
+        assert total["median_ext"] == 40.0
+
+    def test_percentil_con_un_solo_valor(self):
+        assert q._percentile([7.0], 90) == 7.0
+
+    def test_percentil_interpola(self):
+        assert q._percentile([0.0, 10.0], 50) == 5.0
+
+    def test_endpoint_con_desglose(self, client, session):
+        ingest_csv(session, content=csv_bytes(row(total_hrs="12")), filename="e.csv")
+        rebuild_scope(session)
+        session.commit()
+        data = client.get("/api/kpis/response-times?dimension=country").json()
+        assert data["overall"]["total_time_hrs"]["median_all"] == 12.0
+        assert data["by"][0]["key"] == "Italy"
+        # La etiqueta viaja con el dato para que el frontend no la duplique.
+        assert "Detección" in data["overall"]["detection_hours"]["label"]

@@ -95,6 +95,17 @@ class WoObservation(Base):
     revenue_loss: Mapped[float | None] = mapped_column(Float)
     incident_lifecycle_hrs: Mapped[float | None] = mapped_column(Float)
 
+    # Cadena de tiempos operativos, tal cual viene del export. Ojo con la cobertura:
+    # Detection y Total están casi al 100%, pero Resolution ronda el 2% y Act el 26%.
+    # Se guardan igual y la API devuelve la cobertura de cada una, para que un 2% no
+    # se lea como una mediana sólida.
+    detection_hrs_src: Mapped[float | None] = mapped_column(Float)
+    act_hrs: Mapped[float | None] = mapped_column(Float)
+    resolution_hrs: Mapped[float | None] = mapped_column(Float)
+    completion_hrs: Mapped[float | None] = mapped_column(Float)
+    validation_hrs: Mapped[float | None] = mapped_column(Float)
+    total_time_hrs: Mapped[float | None] = mapped_column(Float)
+
     # Añadidos en el export de agosto de 2026. `wo_url` apunta a la WO en eMaint, lo
     # que convierte la lista de no detectadas en algo sobre lo que actuar directamente.
     wo_url: Mapped[str | None] = mapped_column(String(500))
@@ -236,7 +247,15 @@ class WoScoped(Base):
     description: Mapped[str | None] = mapped_column(Text)
     capacity_affected: Mapped[float | None] = mapped_column(Float)
     revenue_loss: Mapped[float | None] = mapped_column(Float)
+    # Se proyecta aquí porque la vista de descartes necesita explicar el motivo: sin
+    # la causa, un "fuera por causa distinta de Failure" no dice qué era.
+    cause: Mapped[str | None] = mapped_column(String(80), index=True)
     detection_hours: Mapped[float | None] = mapped_column(Float)
+    act_hrs: Mapped[float | None] = mapped_column(Float)
+    resolution_hrs: Mapped[float | None] = mapped_column(Float)
+    completion_hrs: Mapped[float | None] = mapped_column(Float)
+    validation_hrs: Mapped[float | None] = mapped_column(Float)
+    total_time_hrs: Mapped[float | None] = mapped_column(Float)
     wo_url: Mapped[str | None] = mapped_column(String(500))
     failure_cause: Mapped[str | None] = mapped_column(String(300))
 

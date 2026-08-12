@@ -204,6 +204,14 @@ tbody tr:hover{background:#22252f}
 .btn.sec{background:transparent;border:1px solid var(--line);color:var(--mut)}
 .btn.sec:hover{border-color:var(--acc);color:var(--acc2)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
+  .chip{display:inline-block;padding:1px 7px;margin:1px 2px 1px 0;border-radius:10px;
+        background:#22243180;color:var(--mut);font-size:11px;white-space:nowrap}
+  .chips{max-width:320px;line-height:1.7}
+  .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+  .pill.ok{background:#1d3a2a;color:#5fd39b} .pill.warn{background:#3d3320;color:#e8a020}
+  .pill.bad{background:#3d2222;color:#e57373}
+  .scopeBanner{margin:0 0 14px;padding:11px 14px;border-radius:10px;font-size:13px;
+        background:#3d331f;border:1px solid #6b5320;color:#f0cf8a}
 </style>
 </head>
 <body>
@@ -234,6 +242,10 @@ tbody tr:hover{background:#22252f}
         <div class="fg"><label>Estado</label><select id="st">
           <option value="">Ambas</option><option value="closed">Solo cerradas</option>
           <option value="open">Solo abiertas</option></select></div>
+        <div class="fg"><label>Ámbito MCC</label><select id="sc">
+          <option value="in">Solo lo que aplica</option>
+          <option value="out">Solo lo descartado</option>
+          <option value="all">Todo sin filtrar</option></select></div>
         <div class="fg"><label>Tipo</label>
           <div class="seg" id="typeSeg">
             <button data-t="" class="on">Todas</button>
@@ -244,6 +256,7 @@ tbody tr:hover{background:#22252f}
     </div>
 
     <section id="mainView">
+      <div class="scopeBanner" id="scopeBanner" style="display:none"></div>
       <div class="kpis" id="kpis"></div>
       <div class="grid2">
         <div class="panel">
@@ -286,6 +299,14 @@ tbody tr:hover{background:#22252f}
         <div class="ph"><h2>Iniciativas destacadas</h2><span class="hint">Click para expandir</span></div>
         <div class="psub">Hallazgos calculados sobre la selecci&oacute;n activa, y reglas de scope aplicables</div>
         <div class="acc" id="acc"></div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><h2>Cadena de tiempos</h2>
+          <span class="hint">mediana MCC vs O&amp;M, con cobertura del dato</span></div>
+        <div class="psub">Cada tramo tal como lo informa el export. La cobertura manda:
+          un tramo informado en pocas filas no es un KPI</div>
+        <div id="times"></div>
       </div>
 
       <div class="panel">
@@ -369,7 +390,7 @@ const API = "";                       // mismo origen: lo sirve el propio backen
 
 const S = {view:"main", metric:"wo", dim:"portfolio",
            from:null, to:null, country:"", portfolio:"", contractor:"",
-           type:"", status:"", sort:"wo_ext", dir:-1, page:0, per:9};
+           type:"", status:"", scope:"in", sort:"wo_ext", dir:-1, page:0, per:9};
 const PER = 9;
 let META = null;
 let cache = {};                        // respuestas de la petición en curso
@@ -394,6 +415,7 @@ function qs(extra){
   if(S.contractor) p.set("contractor",S.contractor);
   if(S.type) p.set("incident_type",S.type);
   if(S.status) p.set("status",S.status);
+  if(S.scope && S.scope!=="in") p.set("scope",S.scope);
   for(const [k,v] of Object.entries(extra||{})) if(v!=null&&v!=="") p.set(k,v);
   return p.toString();
 }
@@ -450,6 +472,7 @@ function initControls(){
   })),S.contractor);
   document.getElementById("ctr").onchange=e=>{S.contractor=e.target.value;S.page=0;render();};
   document.getElementById("st").onchange=e=>{S.status=e.target.value;S.page=0;render();};
+  document.getElementById("sc").onchange=e=>{S.scope=e.target.value;S.page=0;render();};
   document.querySelectorAll("#typeSeg button").forEach(b=>b.onclick=()=>{
     S.type=b.dataset.t;
     document.querySelectorAll("#typeSeg button").forEach(x=>x.classList.toggle("on",x===b));
@@ -725,17 +748,79 @@ function renderTable(){
   document.getElementById("pnext").disabled = S.page>=pages-1;
 }
 
+/* Cobertura -> fiabilidad. Los umbrales no son caprichosos: Detección y Total vienen
+   informados casi siempre, pero Resolución ronda el 2% de las filas. Sin marcar eso,
+   una mediana sobre 50 filas se presenta igual que una sobre 2400. */
+function coverTag(coverage){
+  if(coverage>=80) return {cls:"ok",  txt:"fiable"};
+  if(coverage>=40) return {cls:"warn",txt:"parcial"};
+  return {cls:"bad", txt:"anecd\u00f3tico"};
+}
+
+function hrs(value){
+  if(value==null) return "&mdash;";
+  if(value<1) return (value*60).toFixed(0)+" min";
+  if(value<48) return value.toFixed(1)+" h";
+  return (value/24).toFixed(1)+" d";
+}
+
+function renderTimes(times){
+  const order=["detection_hours","act_hrs","resolution_hrs","completion_hrs","validation_hrs","total_time_hrs"];
+  const rows=order.map(k=>[k,times[k]]).filter(([,t])=>t);
+  if(!rows.length){ document.getElementById("times").innerHTML='<div class="empty">Sin datos de tiempos</div>'; return; }
+  document.getElementById("times").innerHTML = `
+    <table><thead><tr><th>Tramo</th><th class="num">MCC</th><th class="num">O&amp;M</th>
+      <th class="num">p90</th><th class="num">Cobertura</th></tr></thead>
+    <tbody>${rows.map(([,t])=>{
+      const tag=coverTag(t.coverage);
+      return `<tr style="cursor:default">
+        <td>${esc(t.label)}</td>
+        <td class="num">${hrs(t.median_mcc)}</td>
+        <td class="num">${hrs(t.median_ext)}</td>
+        <td class="num" style="color:var(--mut)">${hrs(t.p90_all)}</td>
+        <td class="num"><span class="pill ${tag.cls}">${t.coverage.toFixed(0)}% ${tag.txt}</span></td>
+      </tr>`;}).join("")}</tbody></table>
+    <div class="expl">Mediana, no media: los tramos tienen colas muy largas y un p90 de
+      semanas arrastraría el promedio. <b>Detección</b> es el tramo que mide al MCC
+      (inicio de la incidencia &rarr; WO creada) y es el único con cobertura completa junto al
+      total. Los marcados como <b>anecdóticos</b> están informados en tan pocas filas que
+      su mediana no representa al conjunto: se muestran para que se vea que el campo
+      existe y está sin rellenar, no para tomar decisiones.</div>`;
+}
+
+/* Con el ámbito cambiado, el número grande de la pantalla ya NO es el detection rate.
+   Decirlo en la propia pantalla evita que una captura de esta vista circule como si
+   lo fuera: el MCC no puede detectar un mantenimiento planificado, así que ese
+   porcentaje no mide desempeño. */
+function renderScopeBanner(sum){
+  const box=document.getElementById("scopeBanner");
+  if(S.scope==="in"){ box.style.display="none"; return; }
+  box.style.display="";
+  box.innerHTML = S.scope==="out"
+    ? `<b>Est&aacute;s viendo solo lo descartado</b> — ${sum.wos} WOs que quedan fuera del c&aacute;lculo.
+       El porcentaje de arriba <b>no es el detection rate</b> y no mide desempe&ntilde;o: son incidencias
+       que el MCC no pod&iacute;a detectar. Sirve para ver el tama&ntilde;o y el motivo del descarte.`
+    : `<b>Est&aacute;s viendo el export en bruto</b> — ${sum.wos} WOs, sin ninguna regla de &aacute;mbito.
+       El porcentaje mezcla lo que aplica al MCC con trabajo planificado y plantas sin telemetr&iacute;a:
+       <b>no es el detection rate</b>. &Uacute;til para cuadrar totales contra el CSV, no para reportar.`;
+}
+
 function renderExcluded(rows){
   const total=rows.reduce((s,r)=>s+r.wos,0);
+  const chips=list=>(list||[]).map(x=>`<span class="chip">${esc(x.key)} ${x.wos}</span>`).join(" ");
   document.getElementById("excl").innerHTML = rows.length ? `
-    <table><thead><tr><th>Motivo</th><th class="num">WOs</th><th style="width:220px"></th></tr></thead>
+    <table><thead><tr><th>Motivo</th><th class="num">WOs</th><th>Qu&eacute; son</th>
+      <th style="width:140px"></th></tr></thead>
     <tbody>${rows.map(r=>`<tr style="cursor:default">
       <td>${esc(r.reason)}</td><td class="num">${r.wos}</td>
+      <td class="chips">${chips(r.top_causes)}${chips(r.top_equipment)}</td>
       <td><div class="bar"><i style="width:${(r.wos/total*100).toFixed(1)}%;background:var(--mut)"></i></div></td>
     </tr>`).join("")}</tbody></table>
-    <div class="expl">Estas <b>${total}</b> WOs no entran en el cálculo. Cada motivo corresponde a algo que
-    el MCC no podía detectar: plantas sin onboarding, equipos sin telemetría, causas externas o dispositivos
-    sin visibilidad en SCADA. Sin estos filtros el rate castigaría al MCC por cosas fuera de su alcance.</div>`
+    <div class="expl">Estas <b>${total}</b> WOs no entran en el c&aacute;lculo. Cada motivo corresponde a algo
+    que el MCC no pod&iacute;a detectar: trabajo planificado, plantas sin onboarding en N3C, equipos sin
+    telemetr&iacute;a o dispositivos sin visibilidad en SCADA. Sin estos filtros el rate castigar&iacute;a al MCC
+    por cosas fuera de su alcance. Cambia <b>&Aacute;mbito MCC</b> arriba a
+    <i>Solo lo descartado</i> para explorarlas con los mismos filtros.</div>`
     : `<div class="empty">Sin WOs descartadas</div>`;
 }
 </script>
@@ -1343,6 +1428,8 @@ async function render(){
     renderDim(byDim);
     plantRows=byPlant; renderTable();
     renderExcluded(excluded);
+    renderTimes(sum.times);
+    renderScopeBanner(sum);
 
     const byCtr = S.dim==="contractor" ? byDim : await api("/api/kpis/by/contractor",params);
     if(token!==inFlight) return;

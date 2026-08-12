@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .models import ContractorAlias, Plant, ScopeRule
 from .scope import (
-    CAUSE_FAILURE_ONLY,
+    CAUSE_FAILURE_ONLY_DEFAULT,
     COUNTRIES_OUT,
     EQUIPMENT_IN,
     EQUIPMENT_OUT,
@@ -163,7 +163,15 @@ def seed_scope_rules(session: Session) -> int:
     rules += [("equipment_out", e, "sin telemetría: no hay señal que vigilar") for e in sorted(EQUIPMENT_OUT)]
     rules += [("incident_type_in", t, "tipo de incidencia en scope") for t in ("Production Loss", "Communication Loss")]
     rules += [("country_out", c, "shadowing, no es operación del MCC") for c in sorted(COUNTRIES_OUT)]
-    rules += [("cause_failure_only", c, "sólo Cause=Failure; las causas externas no son detectables") for c in sorted(CAUSE_FAILURE_ONLY)]
+    rules += [
+        (
+            "cause_failure_only",
+            c,
+            "sólo Cause=Failure; mantenimiento, revamping y causas externas no son "
+            "incidencias que el MCC pueda detectar ('*' = todos los países)",
+        )
+        for c in sorted(CAUSE_FAILURE_ONLY_DEFAULT)
+    ]
 
     count = 0
     for kind, value, note in rules:

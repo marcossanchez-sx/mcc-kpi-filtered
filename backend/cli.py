@@ -135,11 +135,7 @@ def cmd_cause_rule(args: argparse.Namespace) -> int:
     """
     from app.models import ScopeRule
 
-    countries = (
-        []
-        if args.countries == ["none"]
-        else ["*"] if args.countries == ["all"] else args.countries
-    )
+    countries = [] if args.countries == ["none"] else args.countries
     with get_session_factory()() as session:
         existing = list(
             session.scalars(select(ScopeRule).where(ScopeRule.kind == "cause_failure_only"))
@@ -148,13 +144,8 @@ def cmd_cause_rule(args: argparse.Namespace) -> int:
             session.delete(rule)
         session.flush()
 
-        if countries == ["*"]:
-            countries = [
-                c
-                for (c,) in session.execute(
-                    select(WoScoped.country).where(WoScoped.in_scope.is_(True)).distinct()
-                )
-            ]
+        if countries == ["all"]:
+            countries = ["*"]  # comodín: aplica a todos los países, presentes y futuros
         for country in countries:
             session.add(
                 ScopeRule(
@@ -164,7 +155,8 @@ def cmd_cause_rule(args: argparse.Namespace) -> int:
                 )
             )
         session.commit()
-        print("regla aplicada a:", ", ".join(sorted(countries)) or "ningún país")
+        label = "todos los países" if countries == ["*"] else (", ".join(sorted(countries)) or "ningún país")
+        print("Cause = Failure aplicado a:", label)
         stats = rebuild_scope(session)
         session.commit()
     print(f"\nscope: {stats['in_scope']} en scope, {stats['excluded']} fuera")

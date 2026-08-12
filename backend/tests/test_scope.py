@@ -149,12 +149,31 @@ class TestReglasDeScope:
     def test_tipo_de_incidencia_fuera(self):
         assert evaluate(incident_type="Preventive Maintenance") == sc.R_INCIDENT_TYPE
 
-    def test_cause_failure_solo_en_es_pt_cl(self):
-        es = plant(country="Spain")
-        assert evaluate(plant=es, country="Spain", cause="Curtailment") == sc.R_CAUSE
-        assert evaluate(plant=es, country="Spain", cause="Failure") is None
-        # En Italia no aplica: cuenta cualquier causa.
-        assert evaluate(cause="Curtailment") is None
+    def test_cause_failure_aplica_a_todos_los_paises(self):
+        """
+        Por defecto sólo cuentan las averías, en cualquier país. Mantenimiento y
+        revamping son trabajo planificado: no son órdenes que apliquen al MCC.
+        """
+        for country in ("Spain", "Italy", "France", "Poland"):
+            p = plant(country=country)
+            assert evaluate(plant=p, country=country, cause="Failure") is None
+            for cause in ("Curtailment", "Corrective Maintenance",
+                          "Preventive Maintenance", "Revamping/Repowering", "Other"):
+                assert evaluate(plant=p, country=country, cause=cause) == sc.R_CAUSE, (country, cause)
+
+    def test_la_regla_se_puede_restringir_a_paises(self):
+        """Con una lista explícita, sólo esos países filtran por causa."""
+        italy = plant(country="Italy")
+        only_es = {"Spain"}
+        assert evaluate(plant=italy, country="Italy", cause="Corrective Maintenance",
+                        cause_failure_only=only_es) is None
+        spain = plant(country="Spain")
+        assert evaluate(plant=spain, country="Spain", cause="Corrective Maintenance",
+                        cause_failure_only=only_es) == sc.R_CAUSE
+
+    def test_comodin_cubre_paises_no_listados(self):
+        assert sc.cause_filter_applies("Narnia", {sc.ALL_COUNTRIES}) is True
+        assert sc.cause_filter_applies("Narnia", {"Spain"}) is False
 
     def test_ciclo_de_vida_cero(self):
         assert evaluate(incident_lifecycle_hrs=0) == sc.R_NO_LIFECYCLE

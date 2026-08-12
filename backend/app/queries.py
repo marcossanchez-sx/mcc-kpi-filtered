@@ -17,7 +17,7 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass, field
 
-from sqlalchemy import Select, and_, select
+from sqlalchemy import Select, and_, select, true
 from sqlalchemy.orm import Session
 
 from .models import WoScoped
@@ -35,6 +35,29 @@ DIMENSIONS = {
 }
 
 
+# Tramos de la cadena de tiempos tal como los da el export. El orden es el del
+# ciclo real de la incidencia; la cobertura de cada uno varía muchísimo.
+TIME_FIELDS: dict[str, str] = {
+    "detection_hours": "Detección (inicio → WO creada)",
+    "act_hrs": "Actuación",
+    "resolution_hrs": "Resolución",
+    "completion_hrs": "Cierre",
+    "validation_hrs": "Validación",
+    "total_time_hrs": "Total",
+}
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    """Percentil por interpolación lineal; con un solo valor devuelve ese valor."""
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * pct / 100
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
 @dataclass
 class Filters:
     """Filtros del dashboard. Todos opcionales y combinables."""
@@ -48,8 +71,23 @@ class Filters:
     incident_type: str | None = None      # 'P' | 'C'
     status: str | None = None             # 'open' | 'closed'
 
-    def clauses(self) -> list:
-        conditions = [WoScoped.in_scope.is_(True)]
+    # Qué universo se mide:
+    #   'in'  -> sólo lo que aplica al MCC (por defecto; es el detection rate oficial)
+    #   'out' -> sólo lo descartado, para ver qué se queda fuera y por qué
+    #   'all' -> todo el export en bruto, sin reglas de scope
+    # Sirve para enseñar la diferencia entre lo que aplica y lo que no sin tener que
+    # recargar nada: el descarte ya está persistido con su motivo.
+    scope: str = "in"
+
+    def clauses(self, *, with_scope: bool = True) -> list:
+        conditions: list = []
+        if with_scope:
+            if self.scope == "in":
+                conditions.append(WoScoped.in_scope.is_(True))
+            elif self.scope == "out":
+                conditions.append(WoScoped.in_scope.is_(False))
+            elif self.scope != "all":
+                raise ValueError("scope debe ser 'in', 'out' o 'all'")
         if self.date_from:
             conditions.append(WoScoped.month >= self.date_from)
         if self.date_to:
@@ -72,7 +110,9 @@ class Filters:
 
 
 def base_query(filters: Filters) -> Select:
-    return select(WoScoped).where(and_(*filters.clauses()))
+    # true() como base: con scope='all' y sin filtros la lista queda vacía y and_()
+    # sin argumentos está deprecado.
+    return select(WoScoped).where(and_(true(), *filters.clauses()))
 
 
 def _rate(mcc: float, ext: float) -> float | None:
@@ -91,6 +131,10 @@ class Metrics:
     rev_n: int = 0
     det_mcc: list[float] = field(default_factory=list)
     det_ext: list[float] = field(default_factory=list)
+    # Cadena de tiempos del propio export, separada por actor. Se guarda la lista
+    # completa para poder dar mediana y cobertura: Resolution viene informada en el
+    # 2% de las filas y una mediana sin cobertura al lado engaña.
+    times: dict = field(default_factory=dict)
 
     def add(self, row: WoScoped) -> None:
         if row.is_mcc:
@@ -105,6 +149,11 @@ class Metrics:
                 self.rev_ext += row.revenue_loss
         if row.detection_hours is not None:
             (self.det_mcc if row.is_mcc else self.det_ext).append(row.detection_hours)
+        for name in TIME_FIELDS:
+            value = getattr(row, name, None)
+            if value is not None and value >= 0:
+                slot = self.times.setdefault(name, {"mcc": [], "ext": []})
+                slot["mcc" if row.is_mcc else "ext"].append(value)
 
     @property
     def total(self) -> int:
@@ -128,7 +177,26 @@ class Metrics:
             "detection_median_ext": round(statistics.median(self.det_ext), 2) if self.det_ext else None,
             "detection_median_all": round(statistics.median(det_all), 2) if det_all else None,
             "detection_coverage": round(len(det_all) / self.total * 100, 1) if self.total else 0.0,
+            "times": self._times_as_dict(),
         }
+
+    def _times_as_dict(self) -> dict:
+        """Mediana MCC / O&M y cobertura de cada tramo de la cadena de tiempos."""
+        out: dict[str, dict] = {}
+        for name, label in TIME_FIELDS.items():
+            slot = self.times.get(name) or {"mcc": [], "ext": []}
+            mcc, ext = slot["mcc"], slot["ext"]
+            both = mcc + ext
+            out[name] = {
+                "label": label,
+                "median_mcc": round(statistics.median(mcc), 2) if mcc else None,
+                "median_ext": round(statistics.median(ext), 2) if ext else None,
+                "median_all": round(statistics.median(both), 2) if both else None,
+                "p90_all": round(_percentile(both, 90), 2) if both else None,
+                "n": len(both),
+                "coverage": round(len(both) / self.total * 100, 1) if self.total else 0.0,
+            }
+        return out
 
 
 def summary(session: Session, filters: Filters) -> dict:
@@ -291,29 +359,76 @@ def Metrics_from(rows: list[WoScoped]) -> dict:
 
 def excluded_breakdown(session: Session, filters: Filters) -> list[dict]:
     """
-    Por qué queda fuera cada WO descartada.
+    Por qué queda fuera cada WO descartada, con lo que la caracteriza.
 
-    Permite responder "¿por qué el denominador es este?" sin volver a los CSV, que
-    es la pregunta que siempre aparece al presentar el número.
+    Permite responder "¿por qué el denominador es este?" sin volver a los CSV, que es
+    la pregunta que siempre aparece al presentar el número. Cada motivo lleva sus
+    causas y equipos más frecuentes, para ver de un golpe si el descarte tiene sentido
+    (mantenimiento planificado) o si es una carencia nuestra (planta sin onboardar).
     """
-    conditions = [c for c in filters.clauses() if c is not WoScoped.in_scope.is_(True)]
-    query = select(WoScoped).where(WoScoped.in_scope.is_(False))
-    if filters.date_from:
-        query = query.where(WoScoped.month >= filters.date_from)
-    if filters.date_to:
-        query = query.where(WoScoped.month <= filters.date_to)
-    if filters.country:
-        query = query.where(WoScoped.country == filters.country)
+    conditions = filters.clauses(with_scope=False)
+    query = select(WoScoped).where(WoScoped.in_scope.is_(False), *conditions)
 
-    counts: dict[str, int] = {}
+    groups: dict[str, list[WoScoped]] = {}
     for row in session.scalars(query):
-        counts[row.excluded_reason or "sin motivo"] = (
-            counts.get(row.excluded_reason or "sin motivo", 0) + 1
+        groups.setdefault(row.excluded_reason or "sin motivo", []).append(row)
+
+    total = sum(len(rows) for rows in groups.values())
+    out = []
+    for reason, rows in groups.items():
+        out.append(
+            {
+                "reason": reason,
+                "wos": len(rows),
+                "share": round(len(rows) / total * 100, 1) if total else 0.0,
+                "top_causes": _top(rows, "cause"),
+                "top_equipment": _top(rows, "equipment"),
+                "top_countries": _top(rows, "country"),
+                # Importe en juego. No es pérdida "recuperable": muchas de estas WOs
+                # no son detectables por diseño. Sirve para dimensionar, no para exigir.
+                "revenue": round(sum(r.revenue_loss or 0 for r in rows), 2),
+            }
         )
-    return [
-        {"reason": reason, "wos": count}
-        for reason, count in sorted(counts.items(), key=lambda kv: -kv[1])
-    ]
+    out.sort(key=lambda e: -e["wos"])
+    return out
+
+
+def _top(rows: list[WoScoped], attribute: str, limit: int = 3) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = getattr(row, attribute, None) or "sin dato"
+        counts[value] = counts.get(value, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
+    return [{"key": k, "wos": v} for k, v in ordered]
+
+
+def scope_comparison(session: Session, filters: Filters) -> dict:
+    """
+    Lo que aplica al MCC frente a lo que no, con los mismos filtros en ambos lados.
+
+    Es la vista que contesta "¿y qué estáis dejando fuera?". Importante: el bloque
+    `out` no tiene detection rate interpretable — el MCC no puede detectar un
+    mantenimiento planificado ni una planta sin telemetría, así que ese porcentaje
+    no mide desempeño y no se debe presentar como tal.
+    """
+    def measure(scope: str) -> dict:
+        scoped = Filters(**{**filters.__dict__, "scope": scope})
+        return summary(session, scoped)
+
+    inside, outside = measure("in"), measure("out")
+    total = inside["wos"] + outside["wos"]
+    return {
+        "in_scope": inside,
+        "out_of_scope": outside,
+        "all": measure("all"),
+        "share_in_scope": round(inside["wos"] / total * 100, 1) if total else 0.0,
+        "reasons": excluded_breakdown(session, filters),
+        "note": (
+            "El rate del bloque fuera de scope no mide desempeño: son WOs que el MCC "
+            "no puede detectar (trabajo planificado, equipos sin telemetría, plantas "
+            "sin onboardar). Está sólo para ver el tamaño y el motivo del descarte."
+        ),
+    }
 
 
 def meta(session: Session) -> dict:

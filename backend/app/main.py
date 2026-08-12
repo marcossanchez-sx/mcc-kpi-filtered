@@ -76,6 +76,12 @@ def filters_from_query(
     equipment: str | None = None,
     incident_type: str | None = Query(None, pattern="^[PC]$"),
     status: str | None = Query(None, pattern="^(open|closed)$"),
+    scope: str = Query(
+        "in",
+        pattern="^(in|out|all)$",
+        description="'in' = lo que aplica al MCC (por defecto), 'out' = lo descartado, "
+        "'all' = el export en bruto",
+    ),
 ) -> q.Filters:
     return q.Filters(
         date_from=date_from,
@@ -86,6 +92,7 @@ def filters_from_query(
         equipment=equipment,
         incident_type=incident_type,
         status=status,
+        scope=scope,
     )
 
 
@@ -185,6 +192,43 @@ def scope_excluded(
 ) -> list[dict]:
     """Por qué queda fuera cada WO descartada. Para justificar el denominador."""
     return q.excluded_breakdown(session, filters)
+
+
+@app.get("/api/scope/comparison", tags=["scope"])
+def scope_comparison(
+    filters: q.Filters = Depends(filters_from_query),
+    session: Session = Depends(get_session),
+) -> dict:
+    """
+    Lo que aplica al MCC frente a lo que no, con los mismos filtros a los dos lados.
+
+    Ignora el parámetro `scope` de la petición: devuelve los tres bloques siempre.
+    """
+    return q.scope_comparison(session, filters)
+
+
+@app.get("/api/kpis/response-times", tags=["kpis"])
+def response_times(
+    filters: q.Filters = Depends(filters_from_query),
+    session: Session = Depends(get_session),
+    dimension: str | None = Query(None, description="opcional: desglose por dimensión"),
+) -> dict:
+    """
+    Cadena de tiempos del export: detección, actuación, resolución, cierre, validación
+    y total, con mediana MCC / O&M, p90 y **cobertura**.
+
+    La cobertura es imprescindible: Detección y Total vienen informados casi siempre,
+    pero Resolución ronda el 2% de las filas. Una mediana sobre el 2% no es un KPI.
+    """
+    overall = q.summary(session, filters)
+    payload: dict = {"overall": overall["times"], "wos": overall["wos"]}
+    if dimension:
+        payload["by"] = [
+            {"key": row["key"], "wos": row["wos"], "times": row["times"]}
+            for row in q.by_dimension(session, filters, dimension)
+        ]
+        payload["dimension"] = dimension
+    return payload
 
 
 @app.get("/api/scope/rules", tags=["scope"])
