@@ -203,6 +203,9 @@ def missed_wos(session: Session, filters: Filters, limit: int = 500, offset: int
                 "revenue_loss": r.revenue_loss,
                 "capacity_affected": r.capacity_affected,
                 "detection_hours": r.detection_hours,
+                "failure_cause": r.failure_cause,
+                # Enlace directo a la WO en eMaint: hace la lista accionable.
+                "wo_url": r.wo_url,
             }
             for r in rows
         ],

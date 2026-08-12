@@ -1144,7 +1144,7 @@ function statBlock(s){
 function missedTable(items){
   if(!items.length) return `<div class="empty">Ninguna WO sin detectar en esta selección 🎉</div>`;
   return `<div class="scroll"><table><thead><tr><th>Fecha</th><th>Planta</th><th>Contratista</th>
-    <th>Equipo</th><th>Tipo</th><th>Estado</th><th>Descripción</th></tr></thead><tbody>
+    <th>Equipo</th><th>Tipo</th><th>Estado</th><th>Descripción</th><th>eMaint</th></tr></thead><tbody>
     ${items.map(w=>`<tr style="cursor:default">
       <td style="white-space:nowrap;color:var(--mut)">${fd(w.date)}</td>
       <td><b>${esc(w.plant)}</b></td>
@@ -1152,7 +1152,13 @@ function missedTable(items){
       <td><span class="tag">${esc(w.equipment)}</span></td>
       <td><span class="tag ${w.incident_type==="P"?"p":"c"}">${w.incident_type==="P"?"Production":"Comms"}</span></td>
       <td><span class="tag"${w.ongoing?' style="background:rgba(224,92,92,.13);color:var(--bad)"':''}>${w.ongoing?"Abierta":"Cerrada"}</span></td>
-      <td><span class="dsc" title="${esc(w.description)}">${w.description?esc(w.description):"—"}</span></td>
+      <td><span class="dsc" title="${esc((w.description||"")+(w.failure_cause?" · "+w.failure_cause:""))}">${
+        w.description?esc(w.description):"—"}${w.failure_cause
+          ?`<br><span style="color:var(--dim);font-size:11px">${esc(w.failure_cause)}</span>`:""}</span></td>
+      <td>${w.wo_url
+        ? `<a href="${esc(w.wo_url)}" target="_blank" rel="noopener"
+             style="color:var(--acc2);font-size:11.5px;white-space:nowrap">abrir ↗</a>`
+        : ""}</td>
     </tr>`).join("")}</tbody></table></div>`;
 }
 function dimTable(rows,label){

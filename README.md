@@ -118,6 +118,25 @@ calcula con la versión más reciente de cada work order. Consecuencias práctic
   es visible en vez de silencioso. Merece comentarse con quien mantiene el CMMS: una
   cifra ya reportada puede quedar desfasada.
 
+### Los nombres de columna del export cambian
+
+En agosto de 2026 el export renombró `Om Contract` a `O&M Contractor` y `Revenue Loss`
+a `Revenue Loss (€)`. Como ambos son campos opcionales, una ingesta ingenua habría
+cargado el fichero **perdiendo contratista e importe en silencio** — el fallo más
+peligroso de un pipeline, porque nadie se entera.
+
+Por eso cada campo lógico declara sus alias en `FIELD_ALIASES`, y los que alimentan una
+dimensión (`contractor`, `revenue`, `ongoing`, `wo_created_ts`, `cause`, `country`) se
+comprueban de forma explícita: si no aparece ninguno de sus alias, la carga sigue pero
+devuelve un aviso que se ve en la respuesta de la API y en el dashboard.
+
+Ese export trajo además `Url Emaint` y `Failure Cause`, que ahora se guardan: la lista de
+WOs no detectadas incluye enlace directo a la orden en eMaint.
+
+Al añadir un alias nuevo no hace falta migrar nada: `natural_key` no depende de los
+nombres de columna, así que la misma WO exportada en los dos formatos se reconoce como
+una sola.
+
 ### La clave natural incluye la descripción
 
 `plant + start_ts + equipment + incident_type + hash(description)`.

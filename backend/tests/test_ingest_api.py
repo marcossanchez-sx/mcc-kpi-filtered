@@ -525,3 +525,114 @@ class TestConcentracionYEstado:
         split = client.get("/api/kpis/status-split")
         assert split.status_code == 200
         assert split.json()["n_closed"] == 1
+
+
+class TestAliasDeColumnas:
+    """
+    El export cambió de nombres en agosto de 2026: `Om Contract` pasó a
+    `O&M Contractor` y `Revenue Loss` a `Revenue Loss (€)`. Como son campos
+    opcionales, la carga habría funcionado perdiendo contratista e importe en
+    silencio — el fallo más peligroso de un pipeline. Estos tests lo impiden.
+    """
+
+    NEW_COLUMNS = [
+        "Url Emaint", "Country", "Asset", "O&M Supervisor", "O&M Contractor",
+        "Description English", "Start Ts Local", "WO Created Ts Local", "Ongoing",
+        "CMMS User", "Equipment", "Incident Type", "Cause", "Failure Cause",
+        "Capacity Affected", "Incident Lifecycle (hrs)", "Revenue Loss (€)",
+    ]
+
+    def new_format_csv(self, *, contractor="RES Energy", revenue="2216.0") -> bytes:
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(self.NEW_COLUMNS)
+        writer.writerow([
+            "https://sonnedix.eu.accelix.com/#/nuoro/WorkOrders/abc123", "Italy", "Vada 2",
+            "Cristiano Onnis", contractor, "inverter parado", "1 ago 2026, 8:00",
+            "1 ago 2026, 9:00", "false", "MCC", "Inverter", "Production Loss", "Failure",
+            "PROTECTION TRIP – CAUSE UNKNOWN", "0.3", "5", revenue,
+        ])
+        return buffer.getvalue().encode()
+
+    def test_resuelve_los_nombres_nuevos(self):
+        from app.ingest import resolve_columns
+        mapping, missing = resolve_columns(set(self.NEW_COLUMNS))
+        assert mapping["contractor"] == "O&M Contractor"
+        assert mapping["revenue"] == "Revenue Loss (€)"
+        assert missing == [], f"no debería faltar nada: {missing}"
+
+    def test_resuelve_tambien_los_antiguos(self):
+        from app.ingest import resolve_columns
+        old = set(COLUMNS)
+        mapping, missing = resolve_columns(old)
+        assert mapping["contractor"] == "Om Contract"
+        assert mapping["revenue"] == "Revenue Loss"
+        assert missing == []
+
+    def test_formato_nuevo_conserva_contratista_e_importe(self, session):
+        ingest_csv(session, content=self.new_format_csv(), filename="ago.csv")
+        rebuild_scope(session)
+        record = session.scalars(select(WoScoped)).one()
+        assert record.contractor == "RES", "el alias debe aplicarse sobre el nombre nuevo"
+        assert record.contractor_raw == "RES Energy"
+        assert record.revenue_loss == pytest.approx(2216.0)
+
+    def test_captura_los_campos_nuevos(self, session):
+        ingest_csv(session, content=self.new_format_csv(), filename="ago.csv")
+        rebuild_scope(session)
+        record = session.scalars(select(WoScoped)).one()
+        assert record.wo_url.startswith("https://sonnedix.eu.accelix.com")
+        assert record.failure_cause == "PROTECTION TRIP – CAUSE UNKNOWN"
+
+    def test_avisa_si_falta_una_dimension(self, session):
+        """Sin columna de contratista la carga sigue, pero debe avisar."""
+        columns = [c for c in self.NEW_COLUMNS if c != "O&M Contractor"]
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(columns)
+        writer.writerow([
+            "url", "Italy", "Vada 2", "sup", "desc", "1 ago 2026, 8:00", "1 ago 2026, 9:00",
+            "false", "MCC", "Inverter", "Production Loss", "Failure", "fc", "0.3", "5", "100",
+        ])
+        result = ingest_csv(session, content=buffer.getvalue().encode(), filename="sin.csv")
+        assert result.rows_inserted == 1
+        assert any("contractor" in w for w in result.warnings)
+
+    def test_los_avisos_llegan_a_la_api(self, client):
+        columns = [c for c in self.NEW_COLUMNS if c != "Revenue Loss (€)"]
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(columns)
+        writer.writerow([
+            "url", "Italy", "Vada 2", "sup", "desc", "1 ago 2026, 8:00", "1 ago 2026, 9:00",
+            "false", "MCC", "Inverter", "Production Loss", "Failure", "fc", "0.3", "5",
+        ])
+        response = client.post(
+            "/api/ingest/wo-export",
+            files={"file": ("x.csv", buffer.getvalue().encode(), "text/csv")},
+        )
+        assert response.status_code == 200
+        assert any("revenue" in w for w in response.json()["warnings"])
+
+    def test_mezclar_formatos_no_duplica(self, session):
+        """
+        La misma WO exportada en el formato viejo y en el nuevo debe reconocerse como
+        una sola: la clave natural no depende de los nombres de columna.
+        """
+        ingest_csv(session, content=csv_bytes(
+            row(start="1 ago 2026, 8:00", created="1 ago 2026, 9:00",
+                description="inverter parado", contractor="RES Energy", revenue="2216.0")
+        ), filename="viejo.csv")
+        ingest_csv(session, content=self.new_format_csv(), filename="nuevo.csv")
+        rebuild_scope(session)
+        assert len(session.scalars(select(WoScoped)).all()) == 1
+
+    def test_url_en_la_lista_de_no_detectadas(self, session):
+        ingest_csv(session, content=self.new_format_csv().replace(b",MCC,", b",O&M Contractor,"),
+                   filename="om.csv")
+        rebuild_scope(session)
+        session.commit()
+        missed = q.missed_wos(session, q.Filters())
+        assert missed["total"] == 1
+        assert missed["items"][0]["wo_url"].startswith("https://")
+        assert missed["items"][0]["failure_cause"] == "PROTECTION TRIP – CAUSE UNKNOWN"

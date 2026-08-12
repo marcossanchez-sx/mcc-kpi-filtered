@@ -18,7 +18,7 @@ import datetime as dt
 import hashlib
 import io
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -35,21 +35,57 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
-# Columnas esperadas del export. Si faltan las obligatorias, fallamos rápido con un
-# mensaje claro en vez de cargar basura silenciosamente.
-REQUIRED_COLUMNS = {"Asset", "Start Ts Local", "Equipment", "Incident Type", "CMMS User"}
-
-OPTIONAL_COLUMNS = {
-    "Country",
-    "WO Created Ts Local",
-    "Cause",
-    "Ongoing",
-    "Om Contract",
-    "Description English",
-    "Capacity Affected",
-    "Revenue Loss",
-    "Incident Lifecycle (hrs)",
+# El export ha cambiado de nombres de columna al menos una vez: en agosto de 2026
+# `Om Contract` pasó a `O&M Contractor` y `Revenue Loss` a `Revenue Loss (€)`. Como
+# ambos son campos opcionales, la carga habría funcionado perdiendo el contratista y
+# el importe **en silencio** — el peor fallo posible en un pipeline de datos.
+#
+# Por eso cada campo lógico declara todos sus alias conocidos, y los que alimentan
+# una dimensión del análisis se comprueban explícitamente: si ninguno de sus alias
+# está presente, se avisa en lugar de continuar.
+FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "plant": ("Asset",),
+    "start_ts": ("Start Ts Local",),
+    "equipment": ("Equipment",),
+    "incident_type": ("Incident Type",),
+    "cmms_user": ("CMMS User",),
+    "country": ("Country",),
+    "wo_created_ts": ("WO Created Ts Local",),
+    "cause": ("Cause",),
+    "ongoing": ("Ongoing",),
+    "contractor": ("O&M Contractor", "Om Contract"),
+    "description": ("Description English",),
+    "capacity": ("Capacity Affected",),
+    "revenue": ("Revenue Loss (€)", "Revenue Loss"),
+    "lifecycle": ("Incident Lifecycle (hrs)",),
+    "wo_url": ("Url Emaint",),
+    "failure_cause": ("Failure Cause",),
+    "supervisor": ("O&M Supervisor",),
 }
+
+# Sin estos no se puede identificar ni atribuir una WO: la carga se aborta.
+REQUIRED_FIELDS = ("plant", "start_ts", "equipment", "incident_type", "cmms_user")
+
+# Estos alimentan una dimensión o una métrica del dashboard. Si faltan, la carga
+# sigue pero se registra un aviso que llega hasta la respuesta de la API.
+EXPECTED_FIELDS = ("contractor", "revenue", "ongoing", "wo_created_ts", "cause", "country")
+
+
+def resolve_columns(columns: set[str]) -> tuple[dict[str, str], list[str]]:
+    """
+    Empareja cada campo lógico con el nombre real que trae el fichero.
+
+    Devuelve el mapeo y la lista de campos esperados que no se han encontrado bajo
+    ningún alias, para poder avisar en vez de perderlos sin más.
+    """
+    mapping: dict[str, str] = {}
+    for logical, aliases in FIELD_ALIASES.items():
+        for alias in aliases:
+            if alias in columns:
+                mapping[logical] = alias
+                break
+    missing_expected = [f for f in EXPECTED_FIELDS if f not in mapping]
+    return mapping, missing_expected
 
 
 class IngestError(ValueError):
@@ -67,6 +103,7 @@ class IngestResult:
     already_loaded: bool
     period_start: dt.date | None
     period_end: dt.date | None
+    warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -79,6 +116,7 @@ class IngestResult:
             "already_loaded": self.already_loaded,
             "period_start": self.period_start.isoformat() if self.period_start else None,
             "period_end": self.period_end.isoformat() if self.period_end else None,
+            "warnings": self.warnings,
         }
 
 
@@ -154,9 +192,28 @@ def ingest_csv(
 
     reader = csv.DictReader(io.StringIO(text))
     columns = set(reader.fieldnames or [])
-    missing = REQUIRED_COLUMNS - columns
-    if missing:
-        raise IngestError(f"faltan columnas obligatorias: {', '.join(sorted(missing))}")
+    col, missing_expected = resolve_columns(columns)
+
+    missing_required = [f for f in REQUIRED_FIELDS if f not in col]
+    if missing_required:
+        expected = ", ".join(
+            f"{f} (uno de: {' / '.join(FIELD_ALIASES[f])})" for f in missing_required
+        )
+        raise IngestError(f"faltan columnas obligatorias: {expected}")
+
+    warnings: list[str] = []
+    for fieldname in missing_expected:
+        aliases = " / ".join(FIELD_ALIASES[fieldname])
+        warnings.append(
+            f"no se encontró ninguna columna para '{fieldname}' (esperaba {aliases}); "
+            f"esa dimensión quedará vacía en este fichero"
+        )
+        log.warning("columna ausente para %s en %s", fieldname, filename)
+
+    def value(row: dict, fieldname: str) -> str | None:
+        """Lee un campo por su nombre lógico, con el alias que traiga este fichero."""
+        name = col.get(fieldname)
+        return row.get(name) if name else None
 
     source = SourceFile(filename=filename, content_sha256=digest, notes=notes)
     session.add(source)
@@ -184,15 +241,15 @@ def ingest_csv(
 
     for row in reader:
         total += 1
-        start_ts = sc.parse_ts(row.get("Start Ts Local"))
+        start_ts = sc.parse_ts(value(row, "start_ts"))
         if start_ts is None:
             skipped += 1
             continue
 
-        plant_raw = (row.get("Asset") or "").strip()
-        equipment = (row.get("Equipment") or "").strip()
-        incident_type = (row.get("Incident Type") or "").strip()
-        description = (row.get("Description English") or "").strip()
+        plant_raw = (value(row, "plant") or "").strip()
+        equipment = (value(row, "equipment") or "").strip()
+        incident_type = (value(row, "incident_type") or "").strip()
+        description = (value(row, "description") or "").strip()
         key = sc.natural_key(plant_raw, start_ts, equipment, incident_type, description)
 
         # Quedan ~0,7% de filas idénticas en todos los campos que tenemos. No las
@@ -204,7 +261,7 @@ def ingest_csv(
         if occurrence > 1:
             key = f"{key}#{occurrence}"
 
-        cmms_user = (row.get("CMMS User") or "").strip()
+        cmms_user = (value(row, "cmms_user") or "").strip()
         is_mcc = cmms_user.upper() == "MCC"
 
         session.add(
@@ -213,20 +270,22 @@ def ingest_csv(
                 natural_key=key,
                 plant_raw=plant_raw,
                 plant_norm=sc.normalize(plant_raw),
-                country=(row.get("Country") or "").strip() or None,
+                country=(value(row, "country") or "").strip() or None,
                 start_ts=start_ts,
-                wo_created_ts=sc.parse_ts(row.get("WO Created Ts Local")),
+                wo_created_ts=sc.parse_ts(value(row, "wo_created_ts")),
                 equipment=equipment or None,
                 incident_type=incident_type or None,
-                cause=(row.get("Cause") or "").strip() or None,
+                cause=(value(row, "cause") or "").strip() or None,
                 cmms_user=cmms_user or None,
                 is_mcc=is_mcc,
-                ongoing=_to_bool(row.get("Ongoing")),
-                om_contract_raw=(row.get("Om Contract") or "").strip() or None,
+                ongoing=_to_bool(value(row, "ongoing")),
+                om_contract_raw=(value(row, "contractor") or "").strip() or None,
                 description=description or None,
-                capacity_affected=_to_float(row.get("Capacity Affected")),
-                revenue_loss=_to_float(row.get("Revenue Loss")),
-                incident_lifecycle_hrs=_to_float(row.get("Incident Lifecycle (hrs)")),
+                capacity_affected=_to_float(value(row, "capacity")),
+                revenue_loss=_to_float(value(row, "revenue")),
+                incident_lifecycle_hrs=_to_float(value(row, "lifecycle")),
+                wo_url=(value(row, "wo_url") or "").strip() or None,
+                failure_cause=(value(row, "failure_cause") or "").strip() or None,
             )
         )
         inserted += 1
@@ -273,6 +332,7 @@ def ingest_csv(
         already_loaded=False,
         period_start=min_day,
         period_end=max_day,
+        warnings=warnings,
     )
 
 
@@ -353,6 +413,8 @@ def rebuild_scope(session: Session) -> dict:
                 capacity_affected=obs.capacity_affected,
                 revenue_loss=obs.revenue_loss,
                 detection_hours=sc.detection_hours(obs.start_ts, obs.wo_created_ts),
+                wo_url=obs.wo_url,
+                failure_cause=obs.failure_cause,
                 in_scope=reason is None,
                 excluded_reason=reason,
             )

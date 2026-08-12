@@ -95,6 +95,11 @@ class WoObservation(Base):
     revenue_loss: Mapped[float | None] = mapped_column(Float)
     incident_lifecycle_hrs: Mapped[float | None] = mapped_column(Float)
 
+    # Añadidos en el export de agosto de 2026. `wo_url` apunta a la WO en eMaint, lo
+    # que convierte la lista de no detectadas en algo sobre lo que actuar directamente.
+    wo_url: Mapped[str | None] = mapped_column(String(500))
+    failure_cause: Mapped[str | None] = mapped_column(String(300))
+
     source: Mapped[SourceFile] = relationship(back_populates="observations")
 
     __table_args__ = (
@@ -232,6 +237,8 @@ class WoScoped(Base):
     capacity_affected: Mapped[float | None] = mapped_column(Float)
     revenue_loss: Mapped[float | None] = mapped_column(Float)
     detection_hours: Mapped[float | None] = mapped_column(Float)
+    wo_url: Mapped[str | None] = mapped_column(String(500))
+    failure_cause: Mapped[str | None] = mapped_column(String(300))
 
     in_scope: Mapped[bool] = mapped_column(Boolean, index=True, default=True)
     excluded_reason: Mapped[str | None] = mapped_column(String(200), index=True)
