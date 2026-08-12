@@ -48,10 +48,15 @@ EQUIPMENT_OUT = {
 
 INCIDENT_TYPES = {"Production Loss": "P", "Communication Loss": "C"}
 
-# En estos países sólo cuentan las incidencias por fallo. Las causas externas
-# (curtailment, red, meteorología) no son detectables como avería y distorsionarían
-# el rate de estos tres mercados.
-CAUSE_FAILURE_ONLY = {"Spain", "Portugal", "Chile"}
+# Países donde sólo cuentan las incidencias por fallo. Las causas externas
+# (curtailment, red, meteorología) y el trabajo planificado (mantenimiento
+# correctivo/preventivo, revamping) no son incidencias que el MCC pueda detectar.
+#
+# Es el valor por defecto: la lista real vive en la tabla `scope_rule`, así que se
+# puede ampliar o reducir sin tocar código y recalcular el histórico con
+# `rebuild_scope()`. Ver `cause_failure_only` en /api/scope/rules.
+CAUSE_FAILURE_ONLY_DEFAULT = frozenset({"Spain", "Portugal", "Chile"})
+CAUSE_FAILURE_ONLY = CAUSE_FAILURE_ONLY_DEFAULT
 
 # Japón es shadowing, no operación del MCC.
 COUNTRIES_OUT = {"Japan"}
@@ -218,6 +223,7 @@ def evaluate(
     cause: object,
     country: object,
     incident_lifecycle_hrs: object = None,
+    cause_failure_only: frozenset[str] | set[str] | None = None,
 ) -> str | None:
     """
     Devuelve None si la incidencia entra en el cálculo, o el motivo de exclusión.
@@ -262,7 +268,8 @@ def evaluate(
         return R_INCIDENT_TYPE
 
     effective_country = plant.country or str(country).strip()
-    if effective_country in CAUSE_FAILURE_ONLY and str(cause).strip() != "Failure":
+    failure_only = CAUSE_FAILURE_ONLY if cause_failure_only is None else cause_failure_only
+    if effective_country in failure_only and str(cause).strip() != "Failure":
         return R_CAUSE
 
     if plant.visible_for(equipment) is False:

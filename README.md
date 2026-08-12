@@ -168,12 +168,25 @@ Reglas activas:
 | Sólo plantas con onboarding N3C completado, desde su `Completed Since` | Antes de esa fecha el MCC no tenía visibilidad |
 | 9 tipos de equipo en scope, 8 fuera | Sin telemetría no hay señal que vigilar |
 | Sólo Production Loss y Communication Loss | El resto no es detección |
-| ES / PT / CL: sólo `Cause = Failure` | Curtailment, red y meteorología no son averías detectables |
+| ES / PT / CL: sólo `Cause = Failure` | Curtailment, red, meteorología y trabajo planificado no son averías detectables |
 | Japón fuera | Shadowing, no es operación del MCC |
 | Visibilidad por dispositivo (SST / INV / POI / WST / PPC) | Un equipo puede existir y no estar monitorizado |
 | Castelnau excluida desde 2026-07-03 | Perdió comunicación SCADA |
 
-Nada se descarta en silencio: cada WA fuera de scope guarda su motivo, consultable en
+La regla de causa **vive en la tabla `scope_rule`**, no en el código. Ampliarla a todos los
+países y recalcular el histórico es un comando:
+
+```bash
+docker compose exec api python cli.py cause-rule all              # todos los países
+docker compose exec api python cli.py cause-rule Spain Portugal Chile   # volver al defecto
+docker compose exec api python cli.py cause-rule none             # desactivarla
+```
+
+Importa porque el trabajo planificado (mantenimiento correctivo, preventivo, revamping)
+no es algo que el MCC pueda "detectar", y hoy sólo se descarta en tres países. Con la
+regla global el rate sube de 46,3% a 47,7% y el scope baja de 2.551 a 2.395 WOs.
+
+Nada se descarta en silencio: cada WO fuera de scope guarda su motivo, consultable en
 `/api/scope/excluded`. Sirve para responder "¿por qué el denominador es este?" sin
 volver a los CSV, que es la pregunta que siempre aparece al presentar el número.
 

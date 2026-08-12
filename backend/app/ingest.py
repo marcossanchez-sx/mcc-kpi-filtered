@@ -28,6 +28,7 @@ from .models import (
     AttributionChange,
     ContractorAlias,
     Plant,
+    ScopeRule,
     SourceFile,
     WoObservation,
     WoScoped,
@@ -350,6 +351,19 @@ def rebuild_scope(session: Session) -> dict:
         for a in session.scalars(select(ContractorAlias).order_by(ContractorAlias.id))
     ]
 
+    # La regla de causa se lee de la tabla, no del código: ampliarla a todos los
+    # países es un cambio de datos y un rebuild, sin tocar Python ni redeployar.
+    failure_only = {
+        r.value
+        for r in session.scalars(
+            select(ScopeRule).where(ScopeRule.kind == "cause_failure_only")
+        )
+    }
+    if not failure_only:
+        failure_only = set(sc.CAUSE_FAILURE_ONLY_DEFAULT)
+        log.warning("sin reglas cause_failure_only en la tabla; usando el valor por defecto")
+    log.info("cause_failure_only aplicado a: %s", ", ".join(sorted(failure_only)) or "ninguno")
+
     session.execute(delete(WoScoped))
 
     latest = _latest_observation_subquery()
@@ -390,6 +404,7 @@ def rebuild_scope(session: Session) -> dict:
             cause=obs.cause,
             country=obs.country,
             incident_lifecycle_hrs=obs.incident_lifecycle_hrs,
+            cause_failure_only=failure_only,
         )
 
         day = obs.start_ts.date()

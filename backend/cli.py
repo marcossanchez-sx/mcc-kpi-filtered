@@ -124,6 +124,55 @@ def cmd_rebuild(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cause_rule(args: argparse.Namespace) -> int:
+    """
+    Cambia en qué países sólo cuentan las WOs con Cause = Failure.
+
+    El export de agosto viene ya filtrado a Failure, así que no puede aportar
+    mantenimiento ni revamping. Si esos países se dejan sin la regla, el histórico
+    los cuenta y los meses nuevos no: un corte metodológico invisible. Con este
+    comando la regla se cambia y el histórico se recalcula entero.
+    """
+    from app.models import ScopeRule
+
+    countries = (
+        []
+        if args.countries == ["none"]
+        else ["*"] if args.countries == ["all"] else args.countries
+    )
+    with get_session_factory()() as session:
+        existing = list(
+            session.scalars(select(ScopeRule).where(ScopeRule.kind == "cause_failure_only"))
+        )
+        for rule in existing:
+            session.delete(rule)
+        session.flush()
+
+        if countries == ["*"]:
+            countries = [
+                c
+                for (c,) in session.execute(
+                    select(WoScoped.country).where(WoScoped.in_scope.is_(True)).distinct()
+                )
+            ]
+        for country in countries:
+            session.add(
+                ScopeRule(
+                    kind="cause_failure_only",
+                    value=country,
+                    note="sólo Cause=Failure; mantenimiento y revamping no son detectables",
+                )
+            )
+        session.commit()
+        print("regla aplicada a:", ", ".join(sorted(countries)) or "ningún país")
+        stats = rebuild_scope(session)
+        session.commit()
+    print(f"\nscope: {stats['in_scope']} en scope, {stats['excluded']} fuera")
+    for reason, count in stats["excluded_by_reason"].items():
+        print(f"  {count:5d}  {reason}")
+    return 0
+
+
 def cmd_status(_: argparse.Namespace) -> int:
     with get_session_factory()() as session:
         files = session.scalar(select(func.count()).select_from(SourceFile)) or 0
@@ -191,6 +240,17 @@ def main() -> int:
     p_ingest.set_defaults(func=cmd_ingest)
 
     sub.add_parser("rebuild", help="recalcula el scope").set_defaults(func=cmd_rebuild)
+
+    p_cause = sub.add_parser(
+        "cause-rule",
+        help="define en qué países sólo cuenta Cause=Failure, y recalcula",
+    )
+    p_cause.add_argument(
+        "countries",
+        nargs="+",
+        help="lista de países, o 'all' para todos, o 'none' para desactivar la regla",
+    )
+    p_cause.set_defaults(func=cmd_cause_rule)
     sub.add_parser("status", help="resumen del estado").set_defaults(func=cmd_status)
     sub.add_parser("bootstrap", help="init + referencia + ingest + rebuild").set_defaults(
         func=cmd_bootstrap
