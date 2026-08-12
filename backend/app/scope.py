@@ -344,3 +344,19 @@ def detection_hours(start_ts: dt.datetime | None, created_ts: dt.datetime | None
 def iso_week_start(day: dt.date) -> dt.date:
     """Lunes de la semana ISO. El dashboard agrupa por semana empezando en lunes."""
     return day - dt.timedelta(days=day.weekday())
+
+
+WO_GUID_RE = re.compile(
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
+def wo_guid(url: object) -> str | None:
+    """
+    GUID de la WO a partir de la URL de eMaint.
+
+    Se normaliza a minúsculas porque el mismo identificador aparece en mayúsculas en
+    algunos campos (c_opsincidenturl) y en minúsculas en otros.
+    """
+    match = WO_GUID_RE.search(str(url or ""))
+    return match.group(1).lower() if match else None

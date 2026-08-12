@@ -20,7 +20,7 @@ import io
 import logging
 from dataclasses import dataclass, field
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from . import scope as sc
@@ -156,11 +156,11 @@ def _latest_observation_subquery():
     """
     ranked = (
         select(
-            WoObservation.natural_key.label("nk"),
+            WoObservation.identity.label("nk"),
             WoObservation.source_file_id.label("fid"),
             func.row_number()
             .over(
-                partition_by=WoObservation.natural_key,
+                partition_by=WoObservation.identity,
                 order_by=(
                     SourceFile.as_of.desc().nullslast(),
                     WoObservation.source_file_id.desc(),
@@ -250,17 +250,17 @@ def ingest_csv(
     # Estado vigente antes de esta carga, para detectar reatribuciones.
     latest = _latest_observation_subquery()
     previous: dict[str, tuple[str | None, int, str | None]] = {
-        row.natural_key: (row.cmms_user, row.source_file_id, row.cause)
+        row.identity: (row.cmms_user, row.source_file_id, row.cause)
         for row in session.execute(
             select(
-                WoObservation.natural_key,
+                WoObservation.identity,
                 WoObservation.cmms_user,
                 WoObservation.source_file_id,
                 WoObservation.cause,
             )
             .join(
                 latest,
-                (WoObservation.natural_key == latest.c.nk)
+                (WoObservation.identity == latest.c.nk)
                 & (WoObservation.source_file_id == latest.c.max_file),
             )
         )
@@ -297,6 +297,8 @@ def ingest_csv(
 
         cmms_user = (value(row, "cmms_user") or "").strip()
         is_mcc = cmms_user.upper() == "MCC"
+        url = (value(row, "wo_url") or "").strip() or None
+        guid = sc.wo_guid(url)
 
         session.add(
             WoObservation(
@@ -324,7 +326,11 @@ def ingest_csv(
                 completion_hrs=_to_float(value(row, "completion_hrs")),
                 validation_hrs=_to_float(value(row, "validation_hrs")),
                 total_time_hrs=_to_float(value(row, "total_time_hrs")),
-                wo_url=(value(row, "wo_url") or "").strip() or None,
+                wo_url=url,
+                wo_guid=guid,
+                # El GUID manda; la clave compuesta es el respaldo para los exports
+                # que no traen la columna Url Emaint.
+                identity=guid or key,
                 failure_cause=(value(row, "failure_cause") or "").strip() or None,
             )
         )
@@ -338,7 +344,7 @@ def ingest_csv(
         min_day = day if min_day is None or day < min_day else min_day
         max_day = day if max_day is None or day > max_day else max_day
 
-        prior = previous.get(key)
+        prior = previous.get(guid or key)
         if prior is not None:
             cause_value = (value(row, "cause") or "").strip() or None
             # Se auditan los dos campos que reescriben el pasado: quién la abrió y por
@@ -394,6 +400,145 @@ def ingest_csv(
     )
 
 
+def resolve_identities(session: Session) -> dict:
+    """
+    Da identidad de eMaint a las observaciones de exports que no traían Url Emaint.
+
+    Se emparejan por planta + inicio + equipo + tipo de incidencia, deliberadamente
+    **sin** la descripción: el texto es justo lo que cambia cuando alguien reescribe o
+    reutiliza la WO, así que meterlo en el emparejamiento anularía el propósito.
+
+    Sólo se acepta el enlace cuando ese grupo apunta a un único GUID. Si hay varios, el
+    emparejamiento es ambiguo —varias WOs distintas en el mismo minuto y equipo— y se
+    deja la clave compuesta: preferimos no enlazar a enlazar mal.
+    """
+    # Sólo columnas y un UPDATE por lotes: cargar decenas de miles de objetos ORM y
+    # dejar que el flush los recorra uno a uno tardaba minutos.
+    # Dos mapas, y el orden importa:
+    #   1. clave compuesta exacta -> GUID. Es el enlace seguro: si la descripción no
+    #      cambió, la fila vieja y la nueva son la misma WO sin discusión.
+    #   2. clave laxa (sin descripción) -> GUID. Recupera los casos en que el texto se
+    #      reescribió, que son justo los que rompían el pipeline.
+    # Sin el primero, una WO con guid en un export y sin guid en otro se partía en dos
+    # identidades y el total subía en vez de bajar.
+    porclave: dict[str, set[str]] = {}
+    grupos: dict[tuple, set[str]] = {}
+    for natural, plant, start, equipment, incident, guid in session.execute(
+        select(
+            WoObservation.natural_key,
+            WoObservation.plant_norm,
+            WoObservation.start_ts,
+            WoObservation.equipment,
+            WoObservation.incident_type,
+            WoObservation.wo_guid,
+        ).where(WoObservation.wo_guid.isnot(None))
+    ):
+        porclave.setdefault(natural, set()).add(guid)
+        grupos.setdefault((plant, start, equipment, incident), set()).add(guid)
+
+    exactos = {k: next(iter(v)) for k, v in porclave.items() if len(v) == 1}
+    unicos = {k: next(iter(v)) for k, v in grupos.items() if len(v) == 1}
+    ambiguos = sum(1 for v in grupos.values() if len(v) > 1)
+
+    porguid: dict[str, list[int]] = {}
+    sinenlace: list[int] = []
+    for obs_id, plant, start, equipment, incident, natural, identity in session.execute(
+        select(
+            WoObservation.id,
+            WoObservation.plant_norm,
+            WoObservation.start_ts,
+            WoObservation.equipment,
+            WoObservation.incident_type,
+            WoObservation.natural_key,
+            WoObservation.identity,
+        ).where(WoObservation.wo_guid.is_(None))
+    ):
+        guid = exactos.get(natural) or unicos.get((plant, start, equipment, incident))
+        if guid is not None:
+            if identity != guid:
+                porguid.setdefault(guid, []).append(obs_id)
+        elif identity != natural:
+            sinenlace.append(obs_id)
+
+    enlazadas = sum(len(v) for v in porguid.values())
+    for guid, ids in porguid.items():
+        session.execute(
+            update(WoObservation).where(WoObservation.id.in_(ids)).values(identity=guid)
+        )
+    for chunk in range(0, len(sinenlace), 500):
+        ids = sinenlace[chunk : chunk + 500]
+        session.execute(
+            update(WoObservation)
+            .where(WoObservation.id.in_(ids))
+            .values(identity=WoObservation.natural_key)
+        )
+    session.flush()
+    log.info(
+        "identidades resueltas: %d enlazadas por GUID, %d grupos ambiguos sin enlazar",
+        enlazadas, ambiguos,
+    )
+    return {"linked": enlazadas, "ambiguous": ambiguos}
+
+
+def rebuild_changes(session: Session) -> int:
+    """
+    Recalcula el log de cambios desde el historial completo, por identidad.
+
+    Se borra y se reconstruye igual que el scope, y por el mismo motivo: la detección
+    que hace ingest_csv sólo ve las identidades tal como estaban en ese momento, y las
+    de los exports sin Url Emaint no se resuelven hasta resolve_identities(). Hecho
+    aquí, un cambio se detecta aunque la identidad se haya reconstruido después.
+    """
+    session.execute(delete(AttributionChange))
+
+    historial: dict[str, list] = {}
+    for obs_id, identity, plant, start, equipment, user, cause, file_id, as_of in session.execute(
+        select(
+            WoObservation.id,
+            WoObservation.identity,
+            WoObservation.plant_raw,
+            WoObservation.start_ts,
+            WoObservation.equipment,
+            WoObservation.cmms_user,
+            WoObservation.cause,
+            WoObservation.source_file_id,
+            SourceFile.as_of,
+        )
+        .join(SourceFile, SourceFile.id == WoObservation.source_file_id)
+        .order_by(SourceFile.as_of.asc().nullsfirst(), WoObservation.source_file_id.asc())
+    ):
+        historial.setdefault(identity, []).append(
+            (plant, start, equipment, user, cause, file_id)
+        )
+
+    total = 0
+    for identity, versiones in historial.items():
+        for antes, ahora in zip(versiones, versiones[1:]):
+            for campo, viejo, nuevo in (
+                ("cmms_user", antes[3], ahora[3]),
+                ("cause", antes[4], ahora[4]),
+            ):
+                if (viejo or "") == (nuevo or ""):
+                    continue
+                session.add(
+                    AttributionChange(
+                        natural_key=identity,
+                        plant_raw=ahora[0],
+                        start_ts=ahora[1],
+                        equipment=ahora[2],
+                        field=campo,
+                        old_value=viejo,
+                        new_value=nuevo,
+                        from_file_id=antes[5],
+                        to_file_id=ahora[5],
+                    )
+                )
+                total += 1
+    session.flush()
+    log.info("log de cambios reconstruido: %d cambios de atribución o causa", total)
+    return total
+
+
 def rebuild_scope(session: Session) -> dict:
     """
     Recalcula wo_scoped desde cero con las observaciones vigentes.
@@ -421,6 +566,9 @@ def rebuild_scope(session: Session) -> dict:
         log.warning("sin reglas cause_failure_only en la tabla; usando el valor por defecto")
     log.info("cause_failure_only aplicado a: %s", ", ".join(sorted(failure_only)) or "ninguno")
 
+    identidades = resolve_identities(session)
+    cambios = rebuild_changes(session)
+
     session.execute(delete(WoScoped))
 
     # Ventana, fecha y *causas presentes* de cada foto.
@@ -435,7 +583,7 @@ def rebuild_scope(session: Session) -> dict:
     # de las reclasificaciones posteriores.
     first_cause: dict[str, str | None] = {}
     for nk, cause in session.execute(
-        select(WoObservation.natural_key, WoObservation.cause)
+        select(WoObservation.identity, WoObservation.cause)
         .join(SourceFile, SourceFile.id == WoObservation.source_file_id)
         .order_by(SourceFile.as_of.asc().nullsfirst(), WoObservation.source_file_id.asc())
     ):
@@ -463,7 +611,7 @@ def rebuild_scope(session: Session) -> dict:
         select(WoObservation, SourceFile.as_of)
         .join(
             latest,
-            (WoObservation.natural_key == latest.c.nk)
+            (WoObservation.identity == latest.c.nk)
             & (WoObservation.source_file_id == latest.c.max_file),
         )
         .join(SourceFile, SourceFile.id == WoObservation.source_file_id)
@@ -538,9 +686,10 @@ def rebuild_scope(session: Session) -> dict:
                 revenue_loss=obs.revenue_loss,
                 detection_hours=sc.detection_hours(obs.start_ts, obs.wo_created_ts),
                 cause=obs.cause,
-                cause_first=first_cause.get(obs.natural_key, obs.cause),
+                identity=obs.identity,
+                cause_first=first_cause.get(obs.identity, obs.cause),
                 cause_reclassified=(
-                    first_cause.get(obs.natural_key, obs.cause) or ""
+                    first_cause.get(obs.identity, obs.cause) or ""
                 ) != (obs.cause or ""),
                 act_hrs=obs.act_hrs,
                 resolution_hrs=obs.resolution_hrs,
@@ -570,4 +719,7 @@ def rebuild_scope(session: Session) -> dict:
         "excluded": sum(reasons.values()),
         "excluded_by_reason": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
         "vanished": vanished_count,
+        "changes": cambios,
+        "identities_linked": identidades["linked"],
+        "identities_ambiguous": identidades["ambiguous"],
     }

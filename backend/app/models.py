@@ -115,6 +115,21 @@ class WoObservation(Base):
     validation_hrs: Mapped[float | None] = mapped_column(Float)
     total_time_hrs: Mapped[float | None] = mapped_column(Float)
 
+    # Identidad de la WO en eMaint, sacada del GUID de Url Emaint.
+    #
+    # Es la clave primaria del sistema de origen y sobrevive a todo lo que le hagan al
+    # registro: cambiar la descripción, la causa, el estado o el autor. La clave
+    # compuesta que usábamos incluía un hash de la descripción, así que una edición de
+    # texto orfanaba la fila y los cambios que viajaban con ella —causa, cierre,
+    # reatribución— nunca se aplicaban.
+    #
+    # `identity` es la que manda para decidir qué observación está vigente:
+    #   wo_guid si el export lo trae, y si no la clave compuesta como respaldo.
+    # Los exports anteriores a agosto de 2026 no traen la columna, y para ellos se
+    # reconstruye por emparejamiento en resolve_identities().
+    wo_guid: Mapped[str | None] = mapped_column(String(40), index=True)
+    identity: Mapped[str | None] = mapped_column(String(220), index=True)
+
     # Añadidos en el export de agosto de 2026. `wo_url` apunta a la WO en eMaint, lo
     # que convierte la lista de no detectadas en algo sobre lo que actuar directamente.
     wo_url: Mapped[str | None] = mapped_column(String(500))
@@ -274,6 +289,7 @@ class WoScoped(Base):
     # o un borrado en eMaint no puede reescribir un porcentaje ya publicado.
     #   vanished        -> ya no viene en el export más reciente que cubre su fecha
     #   last_seen_as_of -> fecha de la última foto que la contenía
+    identity: Mapped[str | None] = mapped_column(String(220), index=True)
     vanished: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     last_seen_as_of: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     detection_hours: Mapped[float | None] = mapped_column(Float)

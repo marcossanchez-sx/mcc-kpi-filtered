@@ -28,7 +28,7 @@ COLUMNS = [
     "Ongoing", "CMMS User", "Equipment", "Incident Type", "Cause",
     "Capacity Affected", "Revenue Loss", "Incident Lifecycle (hrs)",
     "Description English", "Detection (hrs)", "Act (hrs)", "Resolution (hrs)",
-    "Completion (hrs)", "Validation (hrs)", "Total time (hrs)",
+    "Completion (hrs)", "Validation (hrs)", "Total time (hrs)", "Url Emaint",
 ]
 
 
@@ -54,11 +54,13 @@ def row(
     completion_hrs: str = "",
     validation_hrs: str = "",
     total_hrs: str = "10",
+    wo_url: str = "",
 ) -> list[str]:
     return [
         country, plant, contractor, start, created, ongoing, user,
         equipment, incident_type, cause, capacity, revenue, lifecycle, description,
         detection_hrs, act_hrs, resolution_hrs, completion_hrs, validation_hrs, total_hrs,
+        wo_url,
     ]
 
 
@@ -1049,3 +1051,153 @@ class TestReclasificacionDeCausa:
         assert data["total"] == 1
         assert data["items"][0]["cause_first"] == "Failure"
         assert "no deshace la detección" in data["note"]
+
+
+URL = "https://sonnedix.eu.accelix.com/#/vada2/WorkOrders/"
+G1 = "aaaaaaaa-1111-2222-3333-444444444444"
+G2 = "bbbbbbbb-1111-2222-3333-444444444444"
+
+
+class TestIdentidadPorGuid:
+    """
+    La identidad de una WO es su GUID en eMaint, no un hash de su descripción.
+
+    Es el fallo que costó más caro: la clave compuesta incluía sha1(descripción), así
+    que reescribir el texto orfanaba la fila y los cambios que viajaban con ella
+    —causa, cierre, reatribución— no se aplicaban nunca. Caso real: Covatillas 5, la WO
+    del MCC "PST002 without production" (Failure, 3,3 MW, abierta) aparece después como
+    "PERFORMANCE OF THERMOGRAPHY_PST02" (Preventive Maintenance, sin capacidad,
+    cerrada). Es el mismo registro de eMaint reutilizado.
+    """
+
+    def test_extrae_el_guid_y_normaliza_mayusculas(self):
+        from app import scope as sc
+
+        assert sc.wo_guid(URL + G1.upper()) == G1
+        assert sc.wo_guid("sin guid") is None
+        assert sc.wo_guid(None) is None
+
+    def test_el_guid_manda_sobre_la_descripcion(self, session):
+        """Reescribir el texto no crea una WO nueva: es un UPDATE de la misma."""
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", cause="Failure", ongoing="true", capacity="3.3",
+                    description="PST002 without production", wo_url=URL + G1)
+            ),
+            filename="foto-1.csv",
+        )
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", cause="Preventive Maintenance", ongoing="false", capacity="",
+                    description="PERFORMANCE OF THERMOGRAPHY_PST02", wo_url=URL + G1,
+                    created="1 jun 2026, 9:00")
+            ),
+            filename="foto-2.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        wo = session.scalars(select(WoScoped)).one()          # una sola, no dos
+        assert wo.description == "PERFORMANCE OF THERMOGRAPHY_PST02"
+        assert wo.ongoing is False                            # el cierre SÍ se aplica
+        assert wo.cause == "Preventive Maintenance"
+        assert wo.cause_first == "Failure"                    # y queda la traza
+        assert wo.vanished is False                           # no desapareció nada
+
+    def test_sin_el_guid_se_habrian_contado_dos_veces(self, session):
+        """El mismo caso sin URL: dos claves distintas, dos WOs. Es el bug de antes."""
+        ingest_csv(
+            session,
+            content=csv_bytes(row(user="MCC", description="PST002 without production")),
+            filename="a.csv",
+        )
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", description="PERFORMANCE OF THERMOGRAPHY_PST02",
+                    created="1 jun 2026, 9:00")
+            ),
+            filename="b.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        assert len(session.scalars(select(WoScoped)).all()) == 2
+
+    def test_guids_distintos_son_wos_distintas(self, session):
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(description="inv 1.1.4", wo_url=URL + G1),
+                row(description="inv 1.1.3", wo_url=URL + G2),
+            ),
+            filename="dos.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        assert len(session.scalars(select(WoScoped)).all()) == 2
+
+    def test_reconstruye_la_identidad_de_los_exports_sin_url(self, session):
+        """
+        El export viejo no trae Url Emaint. Se le da identidad emparejando por
+        planta+inicio+equipo+tipo contra el export nuevo, que sí la trae.
+        """
+        ingest_csv(
+            session,
+            content=csv_bytes(row(user="MCC", description="PST002 without production")),
+            filename="viejo-sin-url.csv",
+        )
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", description="PERFORMANCE OF THERMOGRAPHY_PST02",
+                    wo_url=URL + G1, created="1 jun 2026, 9:00")
+            ),
+            filename="nuevo-con-url.csv",
+        )
+        stats = rebuild_scope(session)
+        session.commit()
+        assert stats["identities_linked"] == 1
+        assert len(session.scalars(select(WoScoped)).all()) == 1
+
+    def test_no_enlaza_cuando_es_ambiguo(self, session):
+        """
+        Varias WOs en el mismo minuto y equipo: el emparejamiento no es concluyente y
+        se deja la clave compuesta. Preferimos no enlazar a enlazar mal.
+        """
+        ingest_csv(session, content=csv_bytes(row(description="algo antiguo")), filename="v.csv")
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(description="inv 1", wo_url=URL + G1, created="1 jun 2026, 9:00"),
+                row(description="inv 2", wo_url=URL + G2, created="1 jun 2026, 9:00"),
+            ),
+            filename="n.csv",
+        )
+        stats = rebuild_scope(session)
+        session.commit()
+        assert stats["identities_linked"] == 0
+        assert stats["identities_ambiguous"] == 1
+
+    def test_el_orden_de_carga_sigue_sin_importar(self, session):
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="MCC", description="texto nuevo", wo_url=URL + G1,
+                    created="1 jun 2026, 9:00")
+            ),
+            filename="nueva.csv",
+        )
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(user="O&M Contractor", description="texto viejo", wo_url=URL + G1,
+                    created="1 may 2026, 9:00")
+            ),
+            filename="vieja.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        wo = session.scalars(select(WoScoped)).one()
+        assert wo.is_mcc is True
+        assert wo.description == "texto nuevo"
