@@ -805,3 +805,150 @@ class TestCadenaDeTiempos:
         assert data["by"][0]["key"] == "Italy"
         # La etiqueta viaja con el dato para que el frontend no la duplique.
         assert "Detección" in data["overall"]["detection_hours"]["label"]
+
+
+class TestPersistenciaHistorica:
+    """
+    Una WO vista una vez no se pierde nunca.
+
+    Es la garantía que hace que un porcentaje publicado no se pueda mover por detrás:
+    si un export deja de traer una incidencia —fallo de ingesta, borrado en eMaint,
+    edición de un campo clave— la WO se conserva y se marca, no se descuenta. Caso
+    real: 75 WOs de julio-Italia desaparecieron entre el export del 4-ago y el del
+    12-ago, 43 de ellas del MCC.
+    """
+
+    def _dos_fotos(self, session):
+        """
+        Foto 1: A (1 may), B (20 may), C (25 may).
+        Foto 2: A y C, pero B ya no viene. Su ventana [1 may, 25 may] contiene el 20 de
+        mayo, así que la ausencia de B es concluyente.
+        """
+        antigua = csv_bytes(
+            row(description="incidencia A", created="1 may 2026, 9:00"),
+            row(description="incidencia B", start="20 may 2026, 8:00", created="20 may 2026, 9:00"),
+            row(description="incidencia C", start="25 may 2026, 8:00", created="25 may 2026, 9:00"),
+        )
+        nueva = csv_bytes(
+            row(description="incidencia A", created="1 jun 2026, 9:00"),
+            row(description="incidencia C", start="25 may 2026, 8:00", created="1 jun 2026, 9:00"),
+        )
+        ingest_csv(session, content=antigua, filename="foto-1.csv")
+        ingest_csv(session, content=nueva, filename="foto-2.csv")
+        rebuild_scope(session)
+        session.commit()
+
+    def test_la_wo_ausente_se_conserva(self, session):
+        self._dos_fotos(session)
+        descripciones = {
+            r.description
+            for r in session.scalars(select(WoScoped).where(WoScoped.in_scope.is_(True)))
+        }
+        assert descripciones == {"incidencia A", "incidencia B", "incidencia C"}
+
+    def test_y_queda_marcada_como_desaparecida(self, session):
+        self._dos_fotos(session)
+        b = session.scalars(
+            select(WoScoped).where(WoScoped.description == "incidencia B")
+        ).one()
+        assert b.vanished is True
+        assert b.in_scope is True          # sigue contando: eso es lo importante
+        a = session.scalars(
+            select(WoScoped).where(WoScoped.description == "incidencia A")
+        ).one()
+        assert a.vanished is False
+
+    def test_el_rate_no_cambia_al_desaparecer_una_wo(self, session):
+        """El invariante que se pedía: recargar exports no mueve un número publicado."""
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(description="A", user="MCC"),
+                row(description="B", user="O&M Contractor", start="20 may 2026, 8:00"),
+            ),
+            filename="foto-1.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        antes = q.summary(session, q.Filters())["rate_wo"]
+
+        ingest_csv(
+            session,
+            content=csv_bytes(row(description="A", user="MCC", created="1 jun 2026, 9:00")),
+            filename="foto-2.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        assert q.summary(session, q.Filters())["rate_wo"] == antes
+
+    def test_el_orden_de_carga_no_altera_el_resultado(self, session, monkeypatch):
+        """
+        Cargar la foto antigua *después* de la nueva no debe resucitar el dato viejo.
+
+        Antes se ordenaba por id de fichero, o sea por orden de carga: recargar un
+        export antiguo lo ascendía a "el más reciente" y pisaba la atribución buena.
+        """
+        vieja = csv_bytes(row(description="A", user="O&M Contractor", created="1 may 2026, 9:00"))
+        nueva = csv_bytes(row(description="A", user="MCC", created="1 jun 2026, 9:00"))
+        ingest_csv(session, content=nueva, filename="nueva.csv")
+        ingest_csv(session, content=vieja, filename="vieja.csv")   # al revés a propósito
+        rebuild_scope(session)
+        session.commit()
+        vigente = session.scalars(select(WoScoped)).one()
+        assert vigente.is_mcc is True
+
+    def test_as_of_sale_del_maximo_wo_created(self, session):
+        from app.models import SourceFile
+
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(created="1 may 2026, 9:00"),
+                row(created="15 may 2026, 18:30", start="15 may 2026, 8:00"),
+            ),
+            filename="f.csv",
+        )
+        session.commit()
+        f = session.scalars(select(SourceFile)).one()
+        assert f.as_of == dt.datetime(2026, 5, 15, 18, 30)
+
+    def test_rebuild_informa_de_cuantas_conserva(self, session):
+        self._dos_fotos(session)
+        stats = rebuild_scope(session)
+        assert stats["vanished"] == 1
+
+    def test_fuera_de_la_ventana_se_conserva_pero_no_se_marca(self, session):
+        """
+        Límite conocido y asumido a propósito.
+
+        La ventana de cobertura de un export se deduce de las filas que trae, así que
+        una WO que falta *por encima* de su última fila no se puede distinguir de una
+        que el export nunca pretendió cubrir. Se elige el fallo seguro: la WO se
+        conserva igual (que es lo que protege el porcentaje) y simplemente no se marca.
+        Preferimos un aviso de menos a descontar una WO buena.
+        """
+        ingest_csv(
+            session,
+            content=csv_bytes(
+                row(description="A", created="1 may 2026, 9:00"),
+                row(description="Z", start="28 may 2026, 8:00", created="28 may 2026, 9:00"),
+            ),
+            filename="foto-1.csv",
+        )
+        ingest_csv(
+            session,
+            content=csv_bytes(row(description="A", created="1 jun 2026, 9:00")),
+            filename="foto-2.csv",
+        )
+        rebuild_scope(session)
+        session.commit()
+        z = session.scalars(select(WoScoped).where(WoScoped.description == "Z")).one()
+        assert z.in_scope is True     # lo esencial: sigue contando
+        assert z.vanished is False    # no se marca porque no hay certeza
+
+    def test_endpoint_de_auditoria(self, client, session):
+        self._dos_fotos(session)
+        data = client.get("/api/audit/vanished").json()
+        assert data["total"] == 1
+        assert data["items"][0]["description"] == "incidencia B"
+        assert data["items"][0]["last_seen"] is not None

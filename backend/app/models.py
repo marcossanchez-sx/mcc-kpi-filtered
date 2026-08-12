@@ -57,6 +57,15 @@ class SourceFile(Base):
     rows_superseded: Mapped[int] = mapped_column(Integer, default=0)
     period_start: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     period_end: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+
+    # Momento al que corresponde la foto, deducido del máximo 'WO Created Ts' del
+    # fichero: un export no puede contener una WO creada después de generarlo.
+    #
+    # Es lo que ordena qué observación gana, NO el orden de carga. Antes se usaba
+    # source_file_id, y eso significaba que recargar un export antiguo lo convertía en
+    # "el más reciente" y pisaba datos buenos con datos viejos. Con as_of el resultado
+    # es el mismo cargues los ficheros en el orden que quieras.
+    as_of: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     observations: Mapped[list["WoObservation"]] = relationship(back_populates="source")
@@ -250,6 +259,14 @@ class WoScoped(Base):
     # Se proyecta aquí porque la vista de descartes necesita explicar el motivo: sin
     # la causa, un "fuera por causa distinta de Failure" no dice qué era.
     cause: Mapped[str | None] = mapped_column(String(80), index=True)
+
+    # Trazabilidad de la permanencia. Una WO que apareció en un export y desaparece de
+    # los siguientes NO se elimina: se conserva y se marca. Así un problema de ingesta
+    # o un borrado en eMaint no puede reescribir un porcentaje ya publicado.
+    #   vanished        -> ya no viene en el export más reciente que cubre su fecha
+    #   last_seen_as_of -> fecha de la última foto que la contenía
+    vanished: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    last_seen_as_of: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     detection_hours: Mapped[float | None] = mapped_column(Float)
     act_hrs: Mapped[float | None] = mapped_column(Float)
     resolution_hrs: Mapped[float | None] = mapped_column(Float)

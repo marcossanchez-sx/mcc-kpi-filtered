@@ -231,6 +231,21 @@ def response_times(
     return payload
 
 
+@app.get("/api/audit/vanished", tags=["audit"])
+def audit_vanished(
+    filters: q.Filters = Depends(filters_from_query),
+    session: Session = Depends(get_session),
+    limit: int = Query(500, ge=1, le=5000),
+) -> dict:
+    """
+    WOs conservadas tras desaparecer del origen.
+
+    Siguen contando en el detection rate. Están aquí para revisarlas en eMaint, no
+    para descontarlas: quitarlas movería porcentajes ya publicados.
+    """
+    return q.vanished_wos(session, filters, limit=limit)
+
+
 @app.get("/api/scope/rules", tags=["scope"])
 def scope_rules(session: Session = Depends(get_session)) -> dict:
     rules: dict[str, list[dict]] = {}

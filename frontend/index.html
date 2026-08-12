@@ -373,6 +373,13 @@ tbody tr:hover{background:#22252f}
         <div class="psub">Cada export queda como snapshot inmutable</div>
         <div id="filesBox"></div>
       </div>
+
+      <div class="panel">
+        <div class="ph"><h2>Conservadas tras desaparecer del origen</h2>
+          <span class="hint" id="vanTotal"></span></div>
+        <div class="psub">Un porcentaje ya publicado no se mueve porque cambie una ingesta</div>
+        <div id="vanBox"></div>
+      </div>
     </section>
   </main>
 </div>
@@ -1346,11 +1353,38 @@ async function openDim(dimension,row){
 }
 
 /* ═══ Vista de administración ═══ */
+/* WOs que dejaron de venir en el origen y se conservan a propósito. Si se
+   descontaran, un fallo de ingesta o un borrado en eMaint movería un porcentaje ya
+   publicado. Van aquí para revisarlas en eMaint, no para ajustar el número. */
+function renderVanished(v){
+  const box=document.getElementById("vanBox");
+  if(!box) return;
+  document.getElementById("vanTotal").textContent = v.total+" en el filtro actual";
+  if(!v.total){ box.innerHTML='<div class="empty">Ninguna: todas las WOs del histórico siguen en el origen</div>'; return; }
+  box.innerHTML = `
+    <div class="expl" style="margin-top:0">Aparecieron en un export y ya no vienen en los
+      posteriores. <b>Siguen contando</b>: ${v.mcc} del MCC y ${v.ext} del contratista,
+      ${v.still_open} todavía abiertas. Conservarlas es lo que impide que recargar datos
+      cambie un porcentaje que ya se ha presentado. Convendría revisarlas en eMaint.</div>
+    <div class="scroll"><table><thead><tr><th>Fecha</th><th>Planta</th><th>Equipo</th>
+      <th>Autor</th><th>Descripci&oacute;n</th><th>Vista por &uacute;ltima vez</th></tr></thead><tbody>
+      ${v.items.map(i=>`<tr style="cursor:default">
+        <td style="color:var(--mut)">${esc(i.date)}</td>
+        <td><b>${esc(i.plant)}</b></td><td><span class="tag">${esc(i.equipment)}</span></td>
+        <td style="color:${i.is_mcc?"var(--ok)":"var(--mut)"}">${i.is_mcc?"MCC":"O&amp;M"}</td>
+        <td>${i.wo_url?`<a href="${esc(i.wo_url)}" target="_blank" rel="noopener">${esc(String(i.description||"").slice(0,46))} &nearr;</a>`
+                     :esc(String(i.description||"").slice(0,46))}</td>
+        <td style="color:var(--mut)">${esc((i.last_seen||"").replace("T"," ").slice(0,16))}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
 async function renderAdmin(){
   try{
-    const [changes,files]=await Promise.all([
+    const [changes,files,van]=await Promise.all([
       api("/api/audit/attribution-changes",  "limit=100"),
-      api("/api/audit/source-files")]);
+      api("/api/audit/source-files"),
+      api("/api/audit/vanished", qs()+"&limit=200")]);
+    renderVanished(van);
     document.getElementById("acTotal").textContent=changes.total+" en total";
     document.getElementById("acBox").innerHTML = changes.items.length ? `
       <div class="scroll"><table><thead><tr><th>Planta</th><th>Inicio</th><th>Equipo</th>

@@ -402,6 +402,44 @@ def _top(rows: list[WoScoped], attribute: str, limit: int = 3) -> list[dict]:
     return [{"key": k, "wos": v} for k, v in ordered]
 
 
+def vanished_wos(session: Session, filters: Filters, limit: int = 500) -> dict:
+    """
+    WOs que aparecieron en un export y ya no vienen en los posteriores.
+
+    Se conservan en el cálculo a propósito: si se descontaran, un fallo de ingesta o un
+    borrado en eMaint reescribiría porcentajes ya publicados. Esta lista existe para
+    revisarlas una a una y decidir, no para ajustar el número por detrás.
+    """
+    query = select(WoScoped).where(WoScoped.vanished.is_(True), *filters.clauses())
+    rows = list(session.scalars(query.order_by(WoScoped.start_date.desc())))
+    mcc = sum(1 for r in rows if r.is_mcc)
+    return {
+        "total": len(rows),
+        "mcc": mcc,
+        "ext": len(rows) - mcc,
+        "still_open": sum(1 for r in rows if r.ongoing),
+        "by_country": [{"key": k, "wos": v} for k, v in
+                       sorted(_count(rows, "country").items(), key=lambda kv: -kv[1])],
+        "items": [
+            {
+                "plant": r.plant, "country": r.country, "date": r.start_date.isoformat(),
+                "equipment": r.equipment, "is_mcc": r.is_mcc, "ongoing": r.ongoing,
+                "description": r.description, "wo_url": r.wo_url,
+                "last_seen": r.last_seen_as_of.isoformat() if r.last_seen_as_of else None,
+            }
+            for r in rows[:limit]
+        ],
+    }
+
+
+def _count(rows: list[WoScoped], attribute: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = getattr(row, attribute, None) or "sin dato"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def scope_comparison(session: Session, filters: Filters) -> dict:
     """
     Lo que aplica al MCC frente a lo que no, con los mismos filtros en ambos lados.

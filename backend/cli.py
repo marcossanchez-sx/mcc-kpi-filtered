@@ -72,7 +72,14 @@ def cmd_load_reference(_: argparse.Namespace) -> int:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    paths = [Path(p) for p in args.files] if args.files else sorted(INCOMING.glob("*.csv"))
+    if args.files:
+        paths = [Path(p) for p in args.files]
+    else:
+        # Se cargan también los ficheros ya procesados. Son parte del histórico: una WO
+        # que apareció en un export antiguo y ya no viene en los nuevos sólo se puede
+        # conservar si ese export sigue cargado. Es idempotente por hash, así que
+        # recargarlos no duplica nada, y el orden da igual porque manda `as_of`.
+        paths = sorted(INCOMING.glob("*.csv")) + sorted(PROCESSED.glob("*.csv"))
     if not paths:
         print(f"no hay CSV en {INCOMING}")
         return 0
@@ -101,7 +108,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 loaded += 1
             session.commit()
 
-            if args.move and not path.is_absolute():
+            if args.move and not path.is_absolute() and path.parent != PROCESSED:
                 PROCESSED.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(path), str(PROCESSED / path.name))
 
@@ -109,6 +116,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             stats = rebuild_scope(session)
             session.commit()
             print(f"\nscope: {stats['in_scope']} en scope, {stats['excluded']} fuera")
+            if stats.get("vanished"):
+                print(f"    {stats['vanished']} conservadas tras desaparecer del origen")
             for reason, count in stats["excluded_by_reason"].items():
                 print(f"    {count:5d}  {reason}")
     return 0

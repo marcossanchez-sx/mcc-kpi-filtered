@@ -146,13 +146,34 @@ def _to_bool(value: object) -> bool:
 
 
 def _latest_observation_subquery():
-    """Última observación por natural_key, ordenando por el id del fichero."""
-    return (
+    """
+    Observación vigente de cada natural_key: la de la foto más reciente.
+
+    Se ordena por `SourceFile.as_of` y sólo se desempata por id. Ordenar por id sería
+    ordenar por *orden de carga*, y entonces recargar un export antiguo lo ascendería a
+    "el más reciente" y machacaría datos buenos con datos viejos. Con as_of el
+    resultado no depende del orden en que se carguen los ficheros.
+    """
+    ranked = (
         select(
             WoObservation.natural_key.label("nk"),
-            func.max(WoObservation.source_file_id).label("max_file"),
+            WoObservation.source_file_id.label("fid"),
+            func.row_number()
+            .over(
+                partition_by=WoObservation.natural_key,
+                order_by=(
+                    SourceFile.as_of.desc().nullslast(),
+                    WoObservation.source_file_id.desc(),
+                ),
+            )
+            .label("rn"),
         )
-        .group_by(WoObservation.natural_key)
+        .join(SourceFile, SourceFile.id == WoObservation.source_file_id)
+        .subquery()
+    )
+    return (
+        select(ranked.c.nk.label("nk"), ranked.c.fid.label("max_file"))
+        .where(ranked.c.rn == 1)
         .subquery()
     )
 
@@ -245,6 +266,7 @@ def ingest_csv(
     total = 0
     min_day: dt.date | None = None
     max_day: dt.date | None = None
+    max_created: dt.datetime | None = None
 
     for row in reader:
         total += 1
@@ -303,6 +325,10 @@ def ingest_csv(
         )
         inserted += 1
 
+        created = sc.parse_ts(value(row, "wo_created_ts"))
+        if created is not None and (max_created is None or created > max_created):
+            max_created = created
+
         day = start_ts.date()
         min_day = day if min_day is None or day < min_day else min_day
         max_day = day if max_day is None or day > max_day else max_day
@@ -329,6 +355,10 @@ def ingest_csv(
     source.rows_superseded = changes
     source.period_start = min_day
     source.period_end = max_day
+    # Fecha de la foto: un export no puede contener una WO creada después de generarlo,
+    # así que el máximo 'WO Created Ts' del fichero la acota bien. Si el fichero no
+    # trae esa columna, se cae a la fecha de carga, que al menos preserva el orden.
+    source.as_of = max_created or dt.datetime.now()
     session.flush()
 
     log.info(
@@ -378,19 +408,41 @@ def rebuild_scope(session: Session) -> dict:
 
     session.execute(delete(WoScoped))
 
+    # Ventana, fecha y *causas presentes* de cada foto.
+    #
+    # Las causas son imprescindibles para no acusar de borrado lo que sólo es un
+    # filtro. Algunos exports vienen ya filtrados a Cause=Failure: si uno de ellos no
+    # trae una WO de mantenimiento, eso no prueba nada — nunca la habría traído. Sin
+    # esta comprobación salían 2956 "desaparecidas" de las que 2680 eran simplemente
+    # no-Failure ausentes de un export filtrado. Una foto sólo es testigo de la
+    # ausencia de una WO si contiene al menos una fila con esa misma causa.
+    causes_by_file: dict[int, set[str | None]] = {}
+    for file_id, cause in session.execute(
+        select(WoObservation.source_file_id, WoObservation.cause).distinct()
+    ):
+        causes_by_file.setdefault(file_id, set()).add(cause)
+
+    snapshots = [
+        (f.id, f.as_of, f.period_start, f.period_end, causes_by_file.get(f.id, set()))
+        for f in session.scalars(select(SourceFile).order_by(SourceFile.id))
+        if f.as_of is not None
+    ]
+
     latest = _latest_observation_subquery()
-    observations = session.scalars(
-        select(WoObservation).join(
+
+    kept = 0
+    vanished_count = 0
+    reasons: dict[str, int] = {}
+
+    for obs, obs_as_of in session.execute(
+        select(WoObservation, SourceFile.as_of)
+        .join(
             latest,
             (WoObservation.natural_key == latest.c.nk)
             & (WoObservation.source_file_id == latest.c.max_file),
         )
-    )
-
-    kept = 0
-    reasons: dict[str, int] = {}
-
-    for obs in observations:
+        .join(SourceFile, SourceFile.id == WoObservation.source_file_id)
+    ):
         record = plants.get(obs.plant_norm)
         plant_scope = None
         if record is not None:
@@ -420,6 +472,25 @@ def rebuild_scope(session: Session) -> dict:
         )
 
         day = obs.start_ts.date()
+
+        # ¿Desaparecida? Existe una foto posterior que (a) cubre su fecha y (b) sí
+        # trae WOs de su misma causa —o sea, que la habría incluido— y aun así no la
+        # tiene. La WO se conserva de todas formas: un problema de ingesta o un borrado
+        # en eMaint no debe reescribir un porcentaje ya publicado. La marca sirve para
+        # revisarla, no para descontarla.
+        vanished = any(
+            as_of is not None
+            and obs_as_of is not None
+            and as_of > obs_as_of
+            and period_start is not None
+            and period_end is not None
+            and period_start <= day <= period_end
+            and obs.cause in causes
+            for _fid, as_of, period_start, period_end, causes in snapshots
+        )
+        if vanished:
+            vanished_count += 1
+
         session.add(
             WoScoped(
                 observation_id=obs.id,
@@ -450,6 +521,8 @@ def rebuild_scope(session: Session) -> dict:
                 failure_cause=obs.failure_cause,
                 in_scope=reason is None,
                 excluded_reason=reason,
+                vanished=vanished,
+                last_seen_as_of=obs_as_of,
             )
         )
         if reason is None:
@@ -458,9 +531,13 @@ def rebuild_scope(session: Session) -> dict:
             reasons[reason] = reasons.get(reason, 0) + 1
 
     session.flush()
-    log.info("scope reconstruido: %d en scope, %d fuera", kept, sum(reasons.values()))
+    log.info(
+        "scope reconstruido: %d en scope, %d fuera, %d conservadas tras desaparecer del origen",
+        kept, sum(reasons.values()), vanished_count,
+    )
     return {
         "in_scope": kept,
         "excluded": sum(reasons.values()),
         "excluded_by_reason": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
+        "vanished": vanished_count,
     }
